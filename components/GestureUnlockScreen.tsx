@@ -1,5 +1,5 @@
 
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 
 interface GestureUnlockScreenProps {
   onUnlock: (pattern: number[]) => void;
@@ -28,7 +28,6 @@ const GestureUnlockScreen: React.FC<GestureUnlockScreenProps> = ({ onUnlock, onS
   useEffect(() => {
     if (gridRef.current) {
       const dots = Array.from(gridRef.current.children) as HTMLDivElement[];
-      const rect = gridRef.current.getBoundingClientRect();
       dotPositions.current = dots.map(dot => ({
         x: dot.offsetLeft + dot.offsetWidth / 2,
         y: dot.offsetTop + dot.offsetHeight / 2,

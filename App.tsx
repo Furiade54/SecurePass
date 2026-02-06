@@ -6,6 +6,7 @@ import GestureUnlockScreen from './components/GestureUnlockScreen';
 import PasswordModal from './components/PasswordModal';
 import PasswordGeneratorModal from './components/PasswordGeneratorModal';
 import NotificationModal from './components/NotificationModal';
+import MessageModal from './components/MessageModal';
 import { FixedSizeList as List } from 'react-window';
 import ImportExportModal from './components/ImportExportModal';
 import { SecureStorageService } from './utils/secureStorage';
@@ -64,7 +65,6 @@ const Disclaimer: React.FC = () => (
 // --- Main App Component ---
 const App: React.FC = () => {
     const [passwords, setPasswords] = useState<PasswordEntry[]>([]);
-    const [gesturePattern, setGesturePattern] = useState<number[] | null>(null); // Only holds pattern in memory after unlock
     const [hasStoredGesture, setHasStoredGesture] = useState(false);
     const [isLocked, setIsLocked] = useState(true);
 
@@ -78,6 +78,15 @@ const App: React.FC = () => {
     const [editingEntry, setEditingEntry] = useState<PasswordEntry | null>(null);
     const [generatedPasswordForModal, setGeneratedPasswordForModal] = useState<string>('');
     const [searchTerm, setSearchTerm] = useState('');
+    const [messageModal, setMessageModal] = useState({ 
+        isOpen: false, 
+        title: '', 
+        message: '', 
+        type: 'info' as 'info' | 'error' | 'success' | 'warning',
+        onConfirm: undefined as (() => void) | undefined,
+        confirmText: undefined as string | undefined,
+        cancelText: undefined as string | undefined
+    });
     
     const secureStorage = SecureStorageService.getInstance();
 
@@ -123,7 +132,6 @@ const App: React.FC = () => {
         const hash = EncryptionService.hashGesturePattern(pattern);
         localStorage.setItem('securepass_gesture_hash', hash);
         
-        setGesturePattern(pattern);
         setHasStoredGesture(true);
         setIsLocked(false);
 
@@ -140,7 +148,15 @@ const App: React.FC = () => {
         if (storedHash) {
             const currentHash = EncryptionService.hashGesturePattern(pattern);
             if (currentHash !== storedHash) {
-                alert('Patrón incorrecto');
+                setMessageModal({ 
+                    isOpen: true, 
+                    title: 'Acceso Denegado', 
+                    message: 'Patrón incorrecto', 
+                    type: 'error',
+                    onConfirm: undefined,
+                    confirmText: undefined,
+                    cancelText: undefined
+                });
                 return;
             }
         }
@@ -149,13 +165,20 @@ const App: React.FC = () => {
         const success = secureStorage.unlock(patternString);
         
         if (success) {
-            setGesturePattern(pattern);
             setIsLocked(false);
             // Load passwords from secure storage
             const loadedPasswords = secureStorage.get<PasswordEntry[]>('securepass_passwords', []);
             setPasswords(loadedPasswords);
         } else {
-             alert('Error al desbloquear el almacenamiento seguro');
+             setMessageModal({ 
+                 isOpen: true, 
+                 title: 'Error', 
+                 message: 'Error al desbloquear el almacenamiento seguro', 
+                 type: 'error',
+                 onConfirm: undefined,
+                 confirmText: undefined,
+                 cancelText: undefined
+             });
         }
     };
 
@@ -164,29 +187,37 @@ const App: React.FC = () => {
         // If we have passwords stored but NO internal key, it means data is still encrypted with the old gesture (Legacy Mode)
         const hasLegacyData = localStorage.getItem('securepass_passwords') && !localStorage.getItem('securepass_internal_key');
 
-        if (hasLegacyData) {
-            const warningConfirmed = window.confirm(
-                "⚠️ ¡ADVERTENCIA DE SEGURIDAD CRÍTICA! ⚠️\n\n" +
-                "Detectamos que tienes datos guardados con una versión anterior de la aplicación que AÚN NO HAN SIDO MIGRADOS.\n\n" +
-                "Si reseteas tu patrón ahora sin haber desbloqueado la aplicación al menos una vez, PERDERÁS EL ACCESO A TODAS TUS CONTRASEÑAS PERMANENTEMENTE.\n\n" +
-                "Recomendación: Pulsa 'Cancelar', desbloquea con tu patrón actual para asegurar tus datos, y luego intenta resetear.\n\n" +
-                "¿Estás seguro de que quieres continuar y arriesgarte a perder tus datos?"
-            );
-            if (!warningConfirmed) return;
-        } else {
-            if (!window.confirm("¿Deseas resetear el patrón de desbloqueo? Tus contraseñas guardadas se conservarán y podrás acceder a ellas con el nuevo patrón.")) {
-                return;
-            }
-        }
+        const performReset = () => {
+            setHasStoredGesture(false);
+            setIsLocked(false);
+            setPasswords([]);
+            
+            // Clear gesture hash only
+            localStorage.removeItem('securepass_gesture_hash');
+            // We do NOT remove securepass_passwords anymore
+        };
 
-        setGesturePattern(null);
-        setHasStoredGesture(false);
-        setIsLocked(false);
-        setPasswords([]);
-        
-        // Clear gesture hash only
-        localStorage.removeItem('securepass_gesture_hash');
-        // We do NOT remove securepass_passwords anymore
+        if (hasLegacyData) {
+             setMessageModal({
+                 isOpen: true,
+                 title: '⚠️ ¡ADVERTENCIA DE SEGURIDAD CRÍTICA! ⚠️',
+                 message: "Detectamos que tienes datos guardados con una versión anterior de la aplicación que AÚN NO HAN SIDO MIGRADOS.\n\nSi reseteas tu patrón ahora sin haber desbloqueado la aplicación al menos una vez, PERDERÁS EL ACCESO A TODAS TUS CONTRASEÑAS PERMANENTEMENTE.\n\nRecomendación: Pulsa 'Cancelar', desbloquea con tu patrón actual para asegurar tus datos, y luego intenta resetear.\n\n¿Estás seguro de que quieres continuar y arriesgarte a perder tus datos?",
+                 type: 'error',
+                 onConfirm: performReset,
+                 confirmText: 'Sí, arriesgarse',
+                 cancelText: 'Cancelar'
+             });
+        } else {
+             setMessageModal({
+                 isOpen: true,
+                 title: 'Resetear Patrón',
+                 message: "¿Deseas resetear el patrón de desbloqueo? Tus contraseñas guardadas se conservarán y podrás acceder a ellas con el nuevo patrón.",
+                 type: 'warning',
+                 onConfirm: performReset,
+                 confirmText: 'Resetear',
+                 cancelText: 'Cancelar'
+             });
+        }
     };
     
     const handleLock = () => {
@@ -215,9 +246,17 @@ const App: React.FC = () => {
     };
     
     const handleDelete = (id: string) => {
-        if (window.confirm("¿Estás seguro de que deseas eliminar esta contraseña?")) {
-            setPasswords(passwords.filter(p => p.id !== id));
-        }
+        setMessageModal({
+            isOpen: true,
+            title: 'Eliminar Contraseña',
+            message: '¿Estás seguro de que deseas eliminar esta contraseña?',
+            type: 'warning',
+            confirmText: 'Eliminar',
+            cancelText: 'Cancelar',
+            onConfirm: () => {
+                 setPasswords(passwords.filter(p => p.id !== id));
+            }
+        });
     };
     
     const handleOpenAddModal = () => {
@@ -266,11 +305,35 @@ const App: React.FC = () => {
     }, [passwords, selectedCategory, searchTerm]);
 
     if (isLocked || !hasStoredGesture) {
-        return <GestureUnlockScreen onUnlock={handleUnlock} onSetGesture={handleSetGesture} onResetGesture={handleResetGesture} hasGesture={hasStoredGesture} />;
+        return (
+            <>
+                <MessageModal 
+                    isOpen={messageModal.isOpen} 
+                    onClose={() => setMessageModal(prev => ({ ...prev, isOpen: false }))}
+                    title={messageModal.title}
+                    message={messageModal.message}
+                    type={messageModal.type}
+                    onConfirm={messageModal.onConfirm}
+                    confirmText={messageModal.confirmText}
+                    cancelText={messageModal.cancelText}
+                />
+                <GestureUnlockScreen onUnlock={handleUnlock} onSetGesture={handleSetGesture} onResetGesture={handleResetGesture} hasGesture={hasStoredGesture} />
+            </>
+        );
     }
 
     return (
         <>
+            <MessageModal 
+                isOpen={messageModal.isOpen} 
+                onClose={() => setMessageModal(prev => ({ ...prev, isOpen: false }))}
+                title={messageModal.title}
+                message={messageModal.message}
+                type={messageModal.type}
+                onConfirm={messageModal.onConfirm}
+                confirmText={messageModal.confirmText}
+                cancelText={messageModal.cancelText}
+            />
             <div className="flex h-screen bg-gray-900 text-gray-200">
                 {/* Overlay para cerrar sidebar en móvil */}
                 {isSidebarOpen && (
@@ -417,10 +480,6 @@ const App: React.FC = () => {
                         const newPasswords = importedPasswords.filter((p: PasswordEntry) => !existingIds.has(p.id));
                         setPasswords([...passwords, ...newPasswords]);
                     }
-                }}
-                onExport={() => {
-                    // La exportación se maneja dentro del modal
-                    console.log('Export functionality handled in modal');
                 }}
                 passwords={passwords}
             />

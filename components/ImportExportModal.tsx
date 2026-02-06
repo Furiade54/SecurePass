@@ -7,7 +7,6 @@ interface ImportExportModalProps {
   isOpen: boolean;
   onClose: () => void;
   onImport: (passwords: PasswordEntry[]) => void;
-  onExport: () => void;
   passwords: PasswordEntry[];
 }
 
@@ -15,7 +14,6 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
   isOpen, 
   onClose, 
   onImport, 
-  onExport, 
   passwords 
 }) => {
   const [mode, setMode] = useState<'select' | 'export' | 'import'>('select');
