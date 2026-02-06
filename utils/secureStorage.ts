@@ -31,6 +31,9 @@ export class SecureStorageService {
     this.autoLockTimeout = config.autoLockTimeout || 30;
     this.isLocked = false;
     this.updateActivity();
+    
+    // Set a test value to verify password on future unlocks
+    this.set('securepass_test', 'verification_token');
   }
 
   /**

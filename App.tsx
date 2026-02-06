@@ -8,6 +8,8 @@ import PasswordGeneratorModal from './components/PasswordGeneratorModal';
 import ReminderBanner from './components/ReminderBanner';
 import { FixedSizeList as List } from 'react-window';
 import ImportExportModal from './components/ImportExportModal';
+import { SecureStorageService } from './utils/secureStorage';
+import { EncryptionService } from './utils/encryption';
 
 // --- Child Components ---
 
@@ -62,7 +64,8 @@ const Disclaimer: React.FC = () => (
 // --- Main App Component ---
 const App: React.FC = () => {
     const [passwords, setPasswords] = useState<PasswordEntry[]>([]);
-    const [gesturePattern, setGesturePattern] = useState<number[] | null>(null);
+    const [gesturePattern, setGesturePattern] = useState<number[] | null>(null); // Only holds pattern in memory after unlock
+    const [hasStoredGesture, setHasStoredGesture] = useState(false);
     const [isLocked, setIsLocked] = useState(true);
 
     const [selectedCategory, setSelectedCategory] = useState<string>('all');
@@ -75,64 +78,83 @@ const App: React.FC = () => {
     const [generatedPasswordForModal, setGeneratedPasswordForModal] = useState<string>('');
     const [searchTerm, setSearchTerm] = useState('');
     
-    // Load initial data from storage
+    const secureStorage = SecureStorageService.getInstance();
+
+    // Load initial state
     useEffect(() => {
-        try {
-            // For now, use localStorage directly until we implement the secure storage flow
-            const storedPasswords = localStorage.getItem('securepass_passwords');
-            const storedGesture = localStorage.getItem('securepass_gesture');
-            
-            if (storedPasswords) {
-                setPasswords(JSON.parse(storedPasswords));
-            }
-            
-            if (storedGesture) {
-                const gesture = JSON.parse(storedGesture);
-                setGesturePattern(gesture);
+        const checkStorage = async () => {
+            // Check if we have a stored gesture hash or encrypted data
+            const storedHash = localStorage.getItem('securepass_gesture_hash');
+            if (storedHash) {
+                setHasStoredGesture(true);
                 setIsLocked(true);
             } else {
+                setHasStoredGesture(false);
                 setIsLocked(false);
             }
-        } catch (error) {
-            console.error('Error loading data:', error);
-        }
+        };
+        checkStorage();
     }, []);
 
-    // Persist data to storage
+    // Persist data to secure storage when passwords change
     useEffect(() => {
-        try {
-            localStorage.setItem('securepass_passwords', JSON.stringify(passwords));
-        } catch (error) {
-            console.error('Error saving passwords:', error);
-        }
-    }, [passwords]);
-
-    useEffect(() => {
-        try {
-            if (gesturePattern) {
-                localStorage.setItem('securepass_gesture', JSON.stringify(gesturePattern));
+        if (!isLocked && secureStorage.isStorageLocked() === false) {
+            try {
+                secureStorage.set('securepass_passwords', passwords);
+            } catch (error) {
+                console.error('Error saving passwords to secure storage:', error);
             }
-        } catch (error) {
-            console.error('Error saving gesture:', error);
         }
-    }, [gesturePattern]);
+    }, [passwords, isLocked]);
+
+    // We no longer persist the raw gesture pattern to localStorage
+    // Instead we only save the hash when setting the gesture
+
 
     const handleSetGesture = (pattern: number[]) => {
+        const patternString = pattern.join(',');
+        
+        // Initialize secure storage with the pattern as master password
+        secureStorage.initialize({ masterPassword: patternString });
+        
+        // Save hash to know we have a setup
+        const hash = EncryptionService.hashGesturePattern(pattern);
+        localStorage.setItem('securepass_gesture_hash', hash);
+        
         setGesturePattern(pattern);
+        setHasStoredGesture(true);
         setIsLocked(false);
     };
 
     const handleUnlock = (pattern: number[]) => {
-        if (JSON.stringify(pattern) === JSON.stringify(gesturePattern)) {
+        const patternString = pattern.join(',');
+        
+        // Try to unlock storage
+        const success = secureStorage.unlock(patternString);
+        
+        if (success) {
+            setGesturePattern(pattern);
             setIsLocked(false);
+            // Load passwords from secure storage
+            const loadedPasswords = secureStorage.get<PasswordEntry[]>('securepass_passwords', []);
+            setPasswords(loadedPasswords);
+        } else {
+             alert('Patrón incorrecto');
         }
     };
 
     const handleResetGesture = () => {
-        setGesturePattern(null);
-        setIsLocked(false);
-        // Clear stored gesture
-        localStorage.removeItem('securepass_gesture');
+        if (window.confirm("¿Estás seguro? Esto eliminará todas las contraseñas guardadas.")) {
+            setGesturePattern(null);
+            setHasStoredGesture(false);
+            setIsLocked(false);
+            setPasswords([]);
+            
+            // Clear storage
+            localStorage.removeItem('securepass_gesture_hash');
+            // Force clear encrypted data
+            localStorage.removeItem('securepass_passwords');
+        }
     };
     
     const handleLock = () => {
@@ -205,8 +227,8 @@ const App: React.FC = () => {
         });
     }, [passwords, selectedCategory, searchTerm]);
 
-    if (isLocked || !gesturePattern) {
-        return <GestureUnlockScreen onUnlock={handleUnlock} onSetGesture={handleSetGesture} onResetGesture={handleResetGesture} hasGesture={!!gesturePattern} />;
+    if (isLocked || !hasStoredGesture) {
+        return <GestureUnlockScreen onUnlock={handleUnlock} onSetGesture={handleSetGesture} onResetGesture={handleResetGesture} hasGesture={hasStoredGesture} />;
     }
 
     return (
