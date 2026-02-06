@@ -1,11 +1,11 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { PasswordEntry } from './types';
-import { CopyIcon, CheckIcon, EyeIcon, EyeOffIcon, PlusIcon, LockClosedIcon, MenuIcon, XIcon, SparklesIcon, ExternalLinkIcon, ImportExportIcon } from './components/Icons';
+import { CopyIcon, CheckIcon, EyeIcon, EyeOffIcon, PlusIcon, LockClosedIcon, MenuIcon, XIcon, SparklesIcon, ExternalLinkIcon, ImportExportIcon, BellIcon } from './components/Icons';
 import GestureUnlockScreen from './components/GestureUnlockScreen';
 import PasswordModal from './components/PasswordModal';
 import PasswordGeneratorModal from './components/PasswordGeneratorModal';
-import ReminderBanner from './components/ReminderBanner';
+import NotificationModal from './components/NotificationModal';
 import { FixedSizeList as List } from 'react-window';
 import ImportExportModal from './components/ImportExportModal';
 import { SecureStorageService } from './utils/secureStorage';
@@ -74,6 +74,7 @@ const App: React.FC = () => {
     const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
     const [isGeneratorModalOpen, setIsGeneratorModalOpen] = useState(false);
     const [isImportExportModalOpen, setIsImportExportModalOpen] = useState(false);
+    const [isNotificationModalOpen, setIsNotificationModalOpen] = useState(false);
     const [editingEntry, setEditingEntry] = useState<PasswordEntry | null>(null);
     const [generatedPasswordForModal, setGeneratedPasswordForModal] = useState<string>('');
     const [searchTerm, setSearchTerm] = useState('');
@@ -250,6 +251,12 @@ const App: React.FC = () => {
 
     const categories = useMemo(() => ['all', ...Array.from(new Set(passwords.map(p => p.category).filter(Boolean)))], [passwords]);
     
+    const hasNotifications = useMemo(() => {
+        const now = Date.now();
+        const REMINDER_PERIOD_MS = 90 * 24 * 60 * 60 * 1000;
+        return passwords.some(p => now - p.createdAt > REMINDER_PERIOD_MS);
+    }, [passwords]);
+
     const filteredPasswords = useMemo(() => {
         return passwords.filter(p => {
             const matchesCategory = selectedCategory === 'all' || p.category === selectedCategory;
@@ -323,13 +330,24 @@ const App: React.FC = () => {
                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
                             </div>
                         </div>
-                        <button onClick={handleOpenAddModal} className="ml-4 bg-cyan-600 hover:bg-cyan-700 text-white font-bold py-2 px-4 rounded-full flex items-center transition-all">
+                        
+                        <button 
+                            onClick={() => setIsNotificationModalOpen(true)}
+                            className={`ml-3 p-2 rounded-full transition-colors relative ${hasNotifications ? 'bg-yellow-500/10 text-yellow-400 hover:bg-yellow-500/20' : 'text-gray-400 hover:text-white hover:bg-gray-700'}`}
+                            title="Notificaciones"
+                        >
+                            <BellIcon className="w-6 h-6" />
+                            {hasNotifications && (
+                                <span className="absolute top-1 right-1 w-2.5 h-2.5 bg-yellow-500 rounded-full border-2 border-gray-800"></span>
+                            )}
+                        </button>
+
+                        <button onClick={handleOpenAddModal} className="ml-3 bg-cyan-600 hover:bg-cyan-700 text-white font-bold py-2 px-4 rounded-full flex items-center transition-all">
                             <PlusIcon className="w-5 h-5"/>
                             <span className="hidden sm:inline ml-2">Agregar nueva</span>
                         </button>
                     </header>
                     <div className="flex-1 overflow-y-auto p-6">
-                        <ReminderBanner passwords={passwords} onSelectPassword={handleSelectPasswordForEdit} />
                         <div className="space-y-8">
                             {filteredPasswords.length > 0 ? (
                                 <List
@@ -374,6 +392,13 @@ const App: React.FC = () => {
                 isOpen={isGeneratorModalOpen}
                 onClose={() => { setIsGeneratorModalOpen(false); if(isPasswordModalOpen || editingEntry) { setIsPasswordModalOpen(true); } }}
                 onPasswordGenerated={handlePasswordGenerated}
+            />
+
+            <NotificationModal
+                isOpen={isNotificationModalOpen}
+                onClose={() => setIsNotificationModalOpen(false)}
+                passwords={passwords}
+                onSelectPassword={handleSelectPasswordForEdit}
             />
 
             <ImportExportModal
