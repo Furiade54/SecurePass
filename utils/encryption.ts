@@ -10,15 +10,16 @@ export class EncryptionService {
   private static readonly KEY_SIZE = 256;
   private static readonly IV_SIZE = 16;
   private static readonly SALT_SIZE = 32;
-  private static readonly ITERATIONS = 100000;
+  private static readonly ITERATIONS = 5000; // Reduced for performance (was 100,000)
+  private static readonly LEGACY_ITERATIONS = 100000; // For backward compatibility
 
   /**
    * Derive a key from a password using PBKDF2
    */
-  private static deriveKey(password: string, salt: string): CryptoJS.lib.WordArray {
+  private static deriveKey(password: string, salt: string, iterations: number = this.ITERATIONS): CryptoJS.lib.WordArray {
     return CryptoJS.PBKDF2(password, salt, {
       keySize: this.KEY_SIZE / 32,
-      iterations: this.ITERATIONS,
+      iterations: iterations,
       hasher: CryptoJS.algo.SHA256
     });
   }
@@ -28,7 +29,7 @@ export class EncryptionService {
    */
   static encrypt(data: string, password: string): EncryptedData {
     const salt = CryptoJS.lib.WordArray.random(this.SALT_SIZE);
-    const key = this.deriveKey(password, CryptoJS.enc.Hex.stringify(salt));
+    const key = this.deriveKey(password, CryptoJS.enc.Hex.stringify(salt), this.ITERATIONS);
     const iv = CryptoJS.lib.WordArray.random(this.IV_SIZE);
     
     const encrypted = CryptoJS.AES.encrypt(data, key, {
@@ -48,17 +49,31 @@ export class EncryptionService {
    * Decrypt data with AES-256-CBC
    */
   static decrypt(encryptedData: EncryptedData, password: string): string {
-    try {
-      const key = this.deriveKey(password, encryptedData.salt);
+    // Helper function to try decryption with specific iterations
+    const tryDecrypt = (iterations: number): string => {
+      const key = this.deriveKey(password, encryptedData.salt, iterations);
       const decrypted = CryptoJS.AES.decrypt(encryptedData.data, key, {
         iv: CryptoJS.enc.Hex.parse(encryptedData.iv),
         mode: CryptoJS.mode.CBC,
         padding: CryptoJS.pad.Pkcs7
       });
-
       return decrypted.toString(CryptoJS.enc.Utf8);
+    };
+
+    try {
+      // Try with current optimized iterations first
+      const result = tryDecrypt(this.ITERATIONS);
+      if (result) return result;
+      throw new Error('Decryption resulted in empty string');
     } catch (error) {
-      throw new Error('Decryption failed. Invalid password or corrupted data.');
+      try {
+        // Fallback to legacy iterations
+        const legacyResult = tryDecrypt(this.LEGACY_ITERATIONS);
+        if (legacyResult) return legacyResult;
+        throw new Error('Legacy decryption failed');
+      } catch (legacyError) {
+        throw new Error('Decryption failed. Invalid password or corrupted data.');
+      }
     }
   }
 
