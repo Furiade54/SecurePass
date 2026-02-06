@@ -99,18 +99,36 @@ export class SecureStorageService {
     }
 
     try {
-      const encryptedData = localStorage.getItem(key);
-      if (!encryptedData) {
+      const storedData = localStorage.getItem(key);
+      if (!storedData) {
         return defaultValue;
       }
 
-      const encrypted = JSON.parse(encryptedData) as EncryptedData;
-      const decryptedString = EncryptionService.decrypt(encrypted, this.masterPassword);
-      const decrypted = JSON.parse(decryptedString) as T;
-      this.updateActivity();
-      return decrypted;
+      let parsedData: any;
+      try {
+        parsedData = JSON.parse(storedData);
+      } catch (e) {
+        // If not valid JSON, return default
+        return defaultValue;
+      }
+
+      // Check if data is encrypted (has specific structure)
+      if (parsedData && typeof parsedData === 'object' && 'data' in parsedData && 'iv' in parsedData && 'salt' in parsedData) {
+        const decryptedString = EncryptionService.decrypt(parsedData as EncryptedData, this.masterPassword);
+        const decrypted = JSON.parse(decryptedString) as T;
+        this.updateActivity();
+        return decrypted;
+      } else {
+        // Legacy plaintext data found - migrate to encrypted storage
+        console.warn(`Migrating legacy plaintext data for key: ${key}`);
+        // Only migrate if we have the master password (which we should if we are unlocked)
+        if (this.masterPassword) {
+            this.set(key, parsedData);
+        }
+        return parsedData as T;
+      }
     } catch (error) {
-      console.error(`Failed to decrypt data for key ${key}:`, error);
+      console.error(`Failed to retrieve/decrypt data for key ${key}:`, error);
       return defaultValue;
     }
   }
