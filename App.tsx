@@ -449,6 +449,7 @@ const App: React.FC = () => {
                 onOpenGenerator={handleOpenGenerator}
                 generatedPassword={generatedPasswordForModal}
                 existingEntry={editingEntry}
+                categories={categories.filter(c => c !== 'all')}
             />
 
             <PasswordGeneratorModal
