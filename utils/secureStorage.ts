@@ -8,6 +8,7 @@ export interface SecureStorageConfig {
 export class SecureStorageService {
   private static instance: SecureStorageService;
   private masterPassword: string = '';
+  private encryptionKey: string = ''; // Key used for actual encryption
   private autoLockTimeout: number = 30; // 30 minutes default
   private lastActivity: number = Date.now();
   private isLocked: boolean = true;
@@ -24,12 +25,28 @@ export class SecureStorageService {
   }
 
   /**
+   * Get or create the internal encryption key
+   * This key is stored in localStorage to persist across gesture resets
+   */
+  private getInternalKey(): string {
+    let key = localStorage.getItem('securepass_internal_key');
+    if (!key) {
+        // Generate a random key if it doesn't exist
+        key = Array.from(crypto.getRandomValues(new Uint8Array(32)))
+            .map(b => b.toString(16).padStart(2, '0')).join('');
+        localStorage.setItem('securepass_internal_key', key);
+    }
+    return key;
+  }
+
+  /**
    * Initialize the secure storage with master password
    */
   initialize(config: SecureStorageConfig): void {
     this.masterPassword = config.masterPassword;
     this.autoLockTimeout = config.autoLockTimeout || 30;
     this.isLocked = false;
+    this.encryptionKey = this.getInternalKey();
     this.updateActivity();
     
     // Set a test value to verify password on future unlocks
@@ -49,6 +66,9 @@ export class SecureStorageService {
   lock(): void {
     this.isLocked = true;
     this.masterPassword = '';
+    // We keep encryptionKey in memory or clear it? 
+    // For security we should clear it, but we can easily retrieve it from localStorage anyway.
+    this.encryptionKey = ''; 
   }
 
   /**
@@ -56,14 +76,8 @@ export class SecureStorageService {
    */
   unlock(masterPassword: string): boolean {
     try {
-      // Test decryption with a known value
-      const testData = localStorage.getItem('securepass_test');
-      if (testData) {
-        const encrypted = JSON.parse(testData) as EncryptedData;
-        EncryptionService.decrypt(encrypted, masterPassword);
-      }
-      
       this.masterPassword = masterPassword;
+      this.encryptionKey = this.getInternalKey();
       this.isLocked = false;
       this.updateActivity();
       return true;
@@ -82,7 +96,8 @@ export class SecureStorageService {
 
     try {
       const dataString = JSON.stringify(value);
-      const encrypted = EncryptionService.encrypt(dataString, this.masterPassword);
+      // Use encryptionKey instead of masterPassword
+      const encrypted = EncryptionService.encrypt(dataString, this.encryptionKey);
       localStorage.setItem(key, JSON.stringify(encrypted));
       this.updateActivity();
     } catch (error) {
@@ -108,16 +123,51 @@ export class SecureStorageService {
       try {
         parsedData = JSON.parse(storedData);
       } catch (e) {
-        // If not valid JSON, return default
         return defaultValue;
       }
 
-      // Check if data is encrypted (has specific structure)
+      // Check if data is encrypted
       if (parsedData && typeof parsedData === 'object' && 'data' in parsedData && 'iv' in parsedData && 'salt' in parsedData) {
-        const decryptedString = EncryptionService.decrypt(parsedData as EncryptedData, this.masterPassword);
-        const decrypted = JSON.parse(decryptedString) as T;
-        this.updateActivity();
-        return decrypted;
+        let decryptedString: string;
+        try {
+            // Try decrypting with internal key first
+            decryptedString = EncryptionService.decrypt(parsedData as EncryptedData, this.encryptionKey);
+        } catch (decryptError) {
+            // If failed, try with masterPassword (legacy migration support)
+            try {
+                decryptedString = EncryptionService.decrypt(parsedData as EncryptedData, this.masterPassword);
+                
+                // If successful, migrate immediately to the new internal key
+                if (decryptedString) {
+                    try {
+                        const migratedData = JSON.parse(decryptedString) as T;
+                        this.set(key, migratedData); // This will re-encrypt with encryptionKey
+                        console.log(`Successfully migrated legacy data for key ${key} to new encryption scheme.`);
+                        return migratedData;
+                    } catch (migrationError) {
+                         console.error(`Migration failed during re-save for key ${key}:`, migrationError);
+                         // Fallback: return the data even if migration failed, so user doesn't lose access
+                         return JSON.parse(decryptedString) as T;
+                    }
+                }
+            } catch (legacyError) {
+                console.error(`Decryption failed for key ${key}:`, decryptError);
+                return defaultValue;
+            }
+        }
+
+        if (!decryptedString) {
+            return defaultValue;
+        }
+
+        try {
+            const decrypted = JSON.parse(decryptedString) as T;
+            this.updateActivity();
+            return decrypted;
+        } catch (parseError) {
+            console.error(`Failed to parse decrypted JSON for key ${key}. Data might be corrupted.`, parseError);
+            return defaultValue;
+        }
       } else {
         // Legacy plaintext data found - migrate to encrypted storage
         console.warn(`Migrating legacy plaintext data for key: ${key}`);

@@ -98,14 +98,15 @@ const App: React.FC = () => {
 
     // Persist data to secure storage when passwords change
     useEffect(() => {
-        if (!isLocked && secureStorage.isStorageLocked() === false) {
+        // Only save if we are unlocked AND we have a valid gesture stored (not in reset state)
+        if (!isLocked && secureStorage.isStorageLocked() === false && hasStoredGesture) {
             try {
                 secureStorage.set('securepass_passwords', passwords);
             } catch (error) {
                 console.error('Error saving passwords to secure storage:', error);
             }
         }
-    }, [passwords, isLocked]);
+    }, [passwords, isLocked, hasStoredGesture]);
 
     // We no longer persist the raw gesture pattern to localStorage
     // Instead we only save the hash when setting the gesture
@@ -124,10 +125,24 @@ const App: React.FC = () => {
         setGesturePattern(pattern);
         setHasStoredGesture(true);
         setIsLocked(false);
+
+        // Reload passwords (since we might be recovering existing data with internal key)
+        const loadedPasswords = secureStorage.get<PasswordEntry[]>('securepass_passwords', []);
+        setPasswords(loadedPasswords);
     };
 
     const handleUnlock = (pattern: number[]) => {
         const patternString = pattern.join(',');
+        
+        // Verify gesture hash first
+        const storedHash = localStorage.getItem('securepass_gesture_hash');
+        if (storedHash) {
+            const currentHash = EncryptionService.hashGesturePattern(pattern);
+            if (currentHash !== storedHash) {
+                alert('Patrón incorrecto');
+                return;
+            }
+        }
         
         // Try to unlock storage
         const success = secureStorage.unlock(patternString);
@@ -139,22 +154,38 @@ const App: React.FC = () => {
             const loadedPasswords = secureStorage.get<PasswordEntry[]>('securepass_passwords', []);
             setPasswords(loadedPasswords);
         } else {
-             alert('Patrón incorrecto');
+             alert('Error al desbloquear el almacenamiento seguro');
         }
     };
 
     const handleResetGesture = () => {
-        if (window.confirm("¿Estás seguro? Esto eliminará todas las contraseñas guardadas.")) {
-            setGesturePattern(null);
-            setHasStoredGesture(false);
-            setIsLocked(false);
-            setPasswords([]);
-            
-            // Clear storage
-            localStorage.removeItem('securepass_gesture_hash');
-            // Force clear encrypted data
-            localStorage.removeItem('securepass_passwords');
+        // Check for unmigrated legacy data risk
+        // If we have passwords stored but NO internal key, it means data is still encrypted with the old gesture (Legacy Mode)
+        const hasLegacyData = localStorage.getItem('securepass_passwords') && !localStorage.getItem('securepass_internal_key');
+
+        if (hasLegacyData) {
+            const warningConfirmed = window.confirm(
+                "⚠️ ¡ADVERTENCIA DE SEGURIDAD CRÍTICA! ⚠️\n\n" +
+                "Detectamos que tienes datos guardados con una versión anterior de la aplicación que AÚN NO HAN SIDO MIGRADOS.\n\n" +
+                "Si reseteas tu patrón ahora sin haber desbloqueado la aplicación al menos una vez, PERDERÁS EL ACCESO A TODAS TUS CONTRASEÑAS PERMANENTEMENTE.\n\n" +
+                "Recomendación: Pulsa 'Cancelar', desbloquea con tu patrón actual para asegurar tus datos, y luego intenta resetear.\n\n" +
+                "¿Estás seguro de que quieres continuar y arriesgarte a perder tus datos?"
+            );
+            if (!warningConfirmed) return;
+        } else {
+            if (!window.confirm("¿Deseas resetear el patrón de desbloqueo? Tus contraseñas guardadas se conservarán y podrás acceder a ellas con el nuevo patrón.")) {
+                return;
+            }
         }
+
+        setGesturePattern(null);
+        setHasStoredGesture(false);
+        setIsLocked(false);
+        setPasswords([]);
+        
+        // Clear gesture hash only
+        localStorage.removeItem('securepass_gesture_hash');
+        // We do NOT remove securepass_passwords anymore
     };
     
     const handleLock = () => {

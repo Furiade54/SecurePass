@@ -154,6 +154,11 @@ const GestureUnlockScreen: React.FC<GestureUnlockScreenProps> = ({ onUnlock, onS
           }
         }
       } else {
+        // Check minimum length for unlock attempts too
+        if (path.length < 4) {
+            reset();
+            return;
+        }
         onUnlock(path);
         // App.tsx will handle success/failure. We listen for hasGesture prop change.
         // For visual feedback, we can show an error state if unlock fails
