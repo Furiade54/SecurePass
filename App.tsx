@@ -87,6 +87,8 @@ const App: React.FC = () => {
         confirmText: undefined as string | undefined,
         cancelText: undefined as string | undefined
     });
+    const [ignoredNotifications, setIgnoredNotifications] = useState<Record<string, string[]>>({});
+    const [lastBackupDate, setLastBackupDate] = useState<number | null>(null);
     
     const secureStorage = SecureStorageService.getInstance();
 
@@ -106,6 +108,16 @@ const App: React.FC = () => {
         checkStorage();
     }, []);
 
+    // Load ignored notifications and backup date from storage
+    useEffect(() => {
+        if (!isLocked && secureStorage.isStorageLocked() === false) {
+             const storedIgnored = secureStorage.get<Record<string, string[]>>('securepass_ignored_notifications', {});
+             setIgnoredNotifications(storedIgnored);
+             const storedBackupDate = secureStorage.get<number | null>('securepass_last_backup_date', null);
+             setLastBackupDate(storedBackupDate);
+        }
+    }, [isLocked]);
+
     // Persist data to secure storage when passwords change
     useEffect(() => {
         // Only save if we are unlocked AND we have a valid gesture stored (not in reset state)
@@ -117,6 +129,18 @@ const App: React.FC = () => {
             }
         }
     }, [passwords, isLocked, hasStoredGesture]);
+
+    // Persist ignored notifications and backup date when changed
+    useEffect(() => {
+        if (!isLocked && secureStorage.isStorageLocked() === false && hasStoredGesture) {
+            try {
+                secureStorage.set('securepass_ignored_notifications', ignoredNotifications);
+                secureStorage.set('securepass_last_backup_date', lastBackupDate);
+            } catch (error) {
+                console.error('Error saving data to secure storage:', error);
+            }
+        }
+    }, [ignoredNotifications, lastBackupDate, isLocked, hasStoredGesture]);
 
     // We no longer persist the raw gesture pattern to localStorage
     // Instead we only save the hash when setting the gesture
@@ -288,13 +312,61 @@ const App: React.FC = () => {
       }
     };
 
+    const handleIgnoreNotification = (id: string, type: string) => {
+        setIgnoredNotifications(prev => {
+            const currentIgnored = prev[id] || [];
+            if (!currentIgnored.includes(type)) {
+                return { ...prev, [id]: [...currentIgnored, type] };
+            }
+            return prev;
+        });
+    };
+    
+    const handleExportSuccess = () => {
+        setLastBackupDate(Date.now());
+    };
+
     const categories = useMemo(() => ['all', ...Array.from(new Set(passwords.map(p => p.category).filter(Boolean)))], [passwords]);
     
     const hasNotifications = useMemo(() => {
         const now = Date.now();
         const REMINDER_PERIOD_MS = 90 * 24 * 60 * 60 * 1000;
-        return passwords.some(p => now - p.createdAt > REMINDER_PERIOD_MS);
-    }, [passwords]);
+        
+        // Check for old passwords
+        const hasOld = passwords.some(p => {
+             const isIgnored = ignoredNotifications[p.id]?.includes('old');
+             return !isIgnored && (now - p.createdAt > REMINDER_PERIOD_MS);
+        });
+        
+        // Check for weak passwords (less than 8 chars)
+        const hasWeak = passwords.some(p => {
+             const isIgnored = ignoredNotifications[p.id]?.includes('weak');
+             return !isIgnored && (p.password.length < 8);
+        });
+        
+        // Check for duplicate passwords
+        const passwordCounts = new Map<string, number>();
+        passwords.forEach(p => {
+            const isIgnored = ignoredNotifications[p.id]?.includes('duplicate');
+            if (!isIgnored) {
+                 passwordCounts.set(p.password, (passwordCounts.get(p.password) || 0) + 1);
+            }
+        });
+        const hasDuplicates = Array.from(passwordCounts.values()).some(count => count > 1);
+
+        // Check for backup status
+        let hasBackupAlert = false;
+        if (lastBackupDate === undefined || lastBackupDate === null) {
+            hasBackupAlert = true;
+        } else {
+            const daysSinceBackup = (now - lastBackupDate) / (1000 * 60 * 60 * 24);
+            if (daysSinceBackup > 7) {
+                hasBackupAlert = true;
+            }
+        }
+
+        return hasOld || hasWeak || hasDuplicates || hasBackupAlert;
+    }, [passwords, ignoredNotifications, lastBackupDate]);
 
     const filteredPasswords = useMemo(() => {
         return passwords.filter(p => {
@@ -462,6 +534,9 @@ const App: React.FC = () => {
                 isOpen={isNotificationModalOpen}
                 onClose={() => setIsNotificationModalOpen(false)}
                 passwords={passwords}
+                ignoredNotifications={ignoredNotifications}
+                lastBackupDate={lastBackupDate}
+                onIgnoreNotification={handleIgnoreNotification}
                 onSelectPassword={handleSelectPasswordForEdit}
             />
 
@@ -482,6 +557,7 @@ const App: React.FC = () => {
                         setPasswords([...passwords, ...newPasswords]);
                     }
                 }}
+                onExportSuccess={handleExportSuccess}
                 passwords={passwords}
             />
         </>

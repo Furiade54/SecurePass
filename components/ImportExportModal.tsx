@@ -7,13 +7,15 @@ interface ImportExportModalProps {
   isOpen: boolean;
   onClose: () => void;
   onImport: (passwords: PasswordEntry[]) => void;
+  onExportSuccess?: () => void;
   passwords: PasswordEntry[];
 }
 
 const ImportExportModal: React.FC<ImportExportModalProps> = ({ 
   isOpen, 
   onClose, 
-  onImport, 
+  onImport,
+  onExportSuccess,
   passwords 
 }) => {
   const [mode, setMode] = useState<'select' | 'export' | 'import'>('select');
@@ -88,6 +90,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
       URL.revokeObjectURL(url);
 
       setSuccess('Archivo exportado exitosamente');
+      if (onExportSuccess) onExportSuccess();
       setTimeout(() => handleClose(), 2000);
     } catch (error) {
       setError('Error al exportar: ' + (error as Error).message);
