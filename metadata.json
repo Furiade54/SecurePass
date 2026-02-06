@@ -1,0 +1,5 @@
+{
+  "name": "SecurePass Vault",
+  "description": "A modern and secure password manager with gesture-based unlocking, password generation, and organizational categories. All data is stored locally in your browser.",
+  "requestFramePermissions": []
+}
