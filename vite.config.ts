@@ -10,6 +10,7 @@ export default defineConfig(({ mode }) => {
         react(),
         VitePWA({
           registerType: 'autoUpdate',
+          injectRegister: 'auto',
           includeAssets: ['favicon.svg', 'favicon.ico', 'robots.txt', 'apple-touch-icon.png'],
           manifest: {
             name: 'Vault',
@@ -39,7 +40,10 @@ export default defineConfig(({ mode }) => {
             ],
           },
           workbox: {
+            cleanupOutdatedCaches: true,
+            clientsClaim: true,
             globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
+            skipWaiting: true,
           },
         }),
       ],
