@@ -1,7 +1,7 @@
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { PasswordEntry } from './types';
-import { CopyIcon, CheckIcon, EyeIcon, EyeOffIcon, PlusIcon, LockClosedIcon, MenuIcon, XIcon, SparklesIcon, ExternalLinkIcon, ImportExportIcon, BellIcon } from './components/Icons';
+import { CopyIcon, CheckIcon, EyeIcon, EyeOffIcon, PlusIcon, LockClosedIcon, MenuIcon, XIcon, SparklesIcon, ExternalLinkIcon, ImportExportIcon, BellIcon, DotsVerticalIcon, PencilIcon, TrashIcon } from './components/Icons';
 import GestureUnlockScreen from './components/GestureUnlockScreen';
 import PasswordModal from './components/PasswordModal';
 import PasswordGeneratorModal from './components/PasswordGeneratorModal';
@@ -17,11 +17,56 @@ import { EncryptionService } from './utils/encryption';
 const PasswordItem: React.FC<{ entry: PasswordEntry; onEdit: (entry: PasswordEntry) => void; onDelete: (id: string) => void; }> = ({ entry, onEdit, onDelete }) => {
     const [isRevealed, setIsRevealed] = useState(false);
     const [copied, setCopied] = useState<'username' | 'password' | null>(null);
+    const [menuOpen, setMenuOpen] = useState(false);
+    const menuRef = useRef<HTMLDivElement | null>(null);
+
+    useEffect(() => {
+        if (!menuOpen) return;
+        const handleClickOutside = (e: MouseEvent) => {
+            if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+                setMenuOpen(false);
+            }
+        };
+        const handleEsc = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') setMenuOpen(false);
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        document.addEventListener('keydown', handleEsc);
+        return () => {
+            document.removeEventListener('mousedown', handleClickOutside);
+            document.removeEventListener('keydown', handleEsc);
+        };
+    }, [menuOpen]);
 
     const handleCopy = (text: string, type: 'username' | 'password') => {
         navigator.clipboard.writeText(text);
         setCopied(type);
         setTimeout(() => setCopied(null), 2000);
+    };
+
+    const copyUsername = () => {
+        handleCopy(entry.username, 'username');
+        setMenuOpen(false);
+    };
+
+    const copyPassword = () => {
+        handleCopy(entry.password, 'password');
+        setMenuOpen(false);
+    };
+
+    const toggleReveal = () => {
+        setIsRevealed((v) => !v);
+        setMenuOpen(false);
+    };
+
+    const openEdit = () => {
+        onEdit(entry);
+        setMenuOpen(false);
+    };
+
+    const openDelete = () => {
+        onDelete(entry.id);
+        setMenuOpen(false);
     };
 
     return (
@@ -45,20 +90,76 @@ const PasswordItem: React.FC<{ entry: PasswordEntry; onEdit: (entry: PasswordEnt
                 <p className="text-sm text-gray-400 truncate">{entry.username}</p>
                 <p className="text-sm font-mono text-gray-300 mt-1">{isRevealed ? entry.password : '••••••••••••'}</p>
             </div>
-            <div className="flex items-center space-x-0 ml-1">
-                <button onClick={() => setIsRevealed(!isRevealed)} className="p-0 text-gray-400 hover:text-white transition-colors" title={isRevealed ? 'Ocultar contraseña' : 'Mostrar contraseña'}>{isRevealed ? <EyeOffIcon className="w-5 h-5"/> : <EyeIcon className="w-5 h-5"/>}</button>
-                <button onClick={() => handleCopy(entry.username, 'username')} className="p-1 text-gray-400 hover:text-white transition-colors" title="Copiar usuario">{copied === 'username' ? <CheckIcon className="w-5 h-5 text-green-400"/> : <CopyIcon className="w-5 h-5"/>}</button>
-                <button onClick={() => handleCopy(entry.password, 'password')} className="p-1 text-gray-400 hover:text-white transition-colors" title="Copiar contraseña">{copied === 'password' ? <CheckIcon className="w-5 h-5 text-green-400"/> : <CopyIcon className="w-5 h-5"/>}</button>
-                <button onClick={() => onEdit(entry)} className="p-1 text-gray-400 hover:text-white transition-colors" title="Editar"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.5L14.732 3.732z"></path></svg></button>
-                <button onClick={() => onDelete(entry.id)} className="p-1 text-red-500 hover:text-red-400 transition-colors" title="Eliminar"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
+            <div className="relative ml-1" ref={menuRef}>
+                <button
+                    onClick={() => setMenuOpen((v) => !v)}
+                    className="p-2 text-gray-400 hover:text-white hover:bg-gray-700/60 rounded-md transition-colors"
+                    title="Más opciones"
+                    aria-label="Más opciones"
+                    aria-expanded={menuOpen}
+                >
+                    <DotsVerticalIcon className="w-5 h-5" />
+                </button>
+                {menuOpen && (
+                    <div className="absolute right-0 top-full mt-1 w-48 rounded-lg border border-gray-600/60 bg-gray-900/95 backdrop-blur-sm shadow-2xl z-40 overflow-hidden animate-in fade-in zoom-in-95 duration-150 origin-top-right">
+                        <ul className="py-1 text-sm text-gray-200">
+                            <li>
+                                <button
+                                    onClick={toggleReveal}
+                                    className="flex w-full items-center gap-3 px-3 py-2 hover:bg-gray-700/60 transition-colors text-left"
+                                >
+                                    {isRevealed ? <EyeOffIcon className="w-4 h-4 text-gray-400" /> : <EyeIcon className="w-4 h-4 text-gray-400" />}
+                                    <span>{isRevealed ? 'Ocultar contraseña' : 'Mostrar contraseña'}</span>
+                                </button>
+                            </li>
+                            <li>
+                                <button
+                                    onClick={copyUsername}
+                                    className="flex w-full items-center gap-3 px-3 py-2 hover:bg-gray-700/60 transition-colors text-left"
+                                >
+                                    {copied === 'username' ? <CheckIcon className="w-4 h-4 text-green-400" /> : <CopyIcon className="w-4 h-4 text-gray-400" />}
+                                    <span>Copiar usuario</span>
+                                </button>
+                            </li>
+                            <li>
+                                <button
+                                    onClick={copyPassword}
+                                    className="flex w-full items-center gap-3 px-3 py-2 hover:bg-gray-700/60 transition-colors text-left"
+                                >
+                                    {copied === 'password' ? <CheckIcon className="w-4 h-4 text-green-400" /> : <CopyIcon className="w-4 h-4 text-gray-400" />}
+                                    <span>Copiar contraseña</span>
+                                </button>
+                            </li>
+                            <li className="border-t border-gray-700/60 my-1" />
+                            <li>
+                                <button
+                                    onClick={openEdit}
+                                    className="flex w-full items-center gap-3 px-3 py-2 hover:bg-gray-700/60 transition-colors text-left"
+                                >
+                                    <PencilIcon className="w-4 h-4 text-gray-400" />
+                                    <span>Editar</span>
+                                </button>
+                            </li>
+                            <li>
+                                <button
+                                    onClick={openDelete}
+                                    className="flex w-full items-center gap-3 px-3 py-2 hover:bg-red-500/10 transition-colors text-left text-red-400"
+                                >
+                                    <TrashIcon className="w-4 h-4" />
+                                    <span>Eliminar</span>
+                                </button>
+                            </li>
+                        </ul>
+                    </div>
+                )}
             </div>
         </div>
     );
 };
 
 const Disclaimer: React.FC = () => (
-    <div className="bg-red-900/50 border-l-4 border-red-500 text-red-300 p-4 my-4 rounded-r-lg text-xs">
-        <strong>Disclaimer:</strong> Aplicacion construida por Felipe, primera version de prueba
+    <div className="bg-green-900/50 border-l-4 border-red-500 text-Green-300 p-4 my-4 rounded-r-lg text-xs">
+        <strong>Disclaimer:</strong> Mejora QR para compartir contraseñas a otros dispositivos Importar/Exportar
     </div>
 );
 
@@ -78,18 +179,19 @@ const App: React.FC = () => {
     const [editingEntry, setEditingEntry] = useState<PasswordEntry | null>(null);
     const [generatedPasswordForModal, setGeneratedPasswordForModal] = useState<string>('');
     const [searchTerm, setSearchTerm] = useState('');
-    const [messageModal, setMessageModal] = useState({ 
-        isOpen: false, 
-        title: '', 
-        message: '', 
+    const [messageModal, setMessageModal] = useState({
+        isOpen: false,
+        title: '',
+        message: '',
         type: 'info' as 'info' | 'error' | 'success' | 'warning',
         onConfirm: undefined as (() => void) | undefined,
+        onCancel: undefined as (() => void) | undefined,
         confirmText: undefined as string | undefined,
         cancelText: undefined as string | undefined
     });
     const [ignoredNotifications, setIgnoredNotifications] = useState<Record<string, string[]>>({});
     const [lastBackupDate, setLastBackupDate] = useState<number | null>(null);
-    
+
     const secureStorage = SecureStorageService.getInstance();
 
     // Load initial state
@@ -149,7 +251,7 @@ const App: React.FC = () => {
     const handleSetGesture = (pattern: number[]) => {
         const patternString = pattern.join(',');
         
-        // Initialize secure storage with the pattern as master password
+        // Initialize secure storage with the gesture pattern as the unlock key
         secureStorage.initialize({ masterPassword: patternString });
         
         // Save hash to know we have a setup
@@ -172,12 +274,13 @@ const App: React.FC = () => {
         if (storedHash) {
             const currentHash = EncryptionService.hashGesturePattern(pattern);
             if (currentHash !== storedHash) {
-                setMessageModal({ 
-                    isOpen: true, 
-                    title: 'Acceso Denegado', 
-                    message: 'Patrón incorrecto', 
+                setMessageModal({
+                    isOpen: true,
+                    title: 'Acceso Denegado',
+                    message: 'Patrón incorrecto',
                     type: 'error',
                     onConfirm: undefined,
+                    onCancel: undefined,
                     confirmText: undefined,
                     cancelText: undefined
                 });
@@ -194,12 +297,13 @@ const App: React.FC = () => {
             const loadedPasswords = secureStorage.get<PasswordEntry[]>('securepass_passwords', []);
             setPasswords(loadedPasswords);
         } else {
-             setMessageModal({ 
-                 isOpen: true, 
-                 title: 'Error', 
-                 message: 'Error al desbloquear el almacenamiento seguro', 
+             setMessageModal({
+                 isOpen: true,
+                 title: 'Error',
+                 message: 'Error al desbloquear el almacenamiento seguro',
                  type: 'error',
                  onConfirm: undefined,
+                 onCancel: undefined,
                  confirmText: undefined,
                  cancelText: undefined
              });
@@ -228,6 +332,7 @@ const App: React.FC = () => {
                  message: "Detectamos que tienes datos guardados con una versión anterior de la aplicación que AÚN NO HAN SIDO MIGRADOS.\n\nSi reseteas tu patrón ahora sin haber desbloqueado la aplicación al menos una vez, PERDERÁS EL ACCESO A TODAS TUS CONTRASEÑAS PERMANENTEMENTE.\n\nRecomendación: Pulsa 'Cancelar', desbloquea con tu patrón actual para asegurar tus datos, y luego intenta resetear.\n\n¿Estás seguro de que quieres continuar y arriesgarte a perder tus datos?",
                  type: 'error',
                  onConfirm: performReset,
+                 onCancel: undefined,
                  confirmText: 'Sí, arriesgarse',
                  cancelText: 'Cancelar'
              });
@@ -238,6 +343,7 @@ const App: React.FC = () => {
                  message: "¿Deseas resetear el patrón de desbloqueo? Tus contraseñas guardadas se conservarán y podrás acceder a ellas con el nuevo patrón.",
                  type: 'warning',
                  onConfirm: performReset,
+                 onCancel: undefined,
                  confirmText: 'Resetear',
                  cancelText: 'Cancelar'
              });
@@ -249,10 +355,20 @@ const App: React.FC = () => {
         setIsSidebarOpen(false);
     };
 
-    const handleSavePassword = (entryData: Omit<PasswordEntry, 'id' | 'createdAt'> & { id?: string }) => {
-        if (entryData.id) { // Editing existing
+    const findDuplicateEntry = (entryData: Omit<PasswordEntry, 'id' | 'createdAt'> & { id?: string }): PasswordEntry | null => {
+        const siteNorm = entryData.site.trim().toLowerCase();
+        const userNorm = entryData.username.trim().toLowerCase();
+        return passwords.find((p) => {
+            const sameContent = p.site.trim().toLowerCase() === siteNorm && p.username.trim().toLowerCase() === userNorm;
+            const isSelf = entryData.id ? p.id === entryData.id : false;
+            return sameContent && !isSelf;
+        }) || null;
+    };
+
+    const applySavePassword = (entryData: Omit<PasswordEntry, 'id' | 'createdAt'> & { id?: string }) => {
+        if (entryData.id) {
             setPasswords(passwords.map(p => p.id === entryData.id ? { ...p, ...entryData } : p));
-        } else { // Adding new
+        } else {
             const newEntry: PasswordEntry = {
                 ...entryData,
                 id: crypto.randomUUID(),
@@ -262,6 +378,37 @@ const App: React.FC = () => {
         }
         setEditingEntry(null);
         setGeneratedPasswordForModal('');
+    };
+
+    const handleSavePassword = (entryData: Omit<PasswordEntry, 'id' | 'createdAt'> & { id?: string }) => {
+        const duplicate = findDuplicateEntry(entryData);
+
+        if (duplicate) {
+            const isEdit = Boolean(entryData.id);
+            setMessageModal({
+                isOpen: true,
+                title: isEdit
+                    ? 'Conflicto: combinación sitio + usuario ya existe'
+                    : 'Entrada duplicada detectada',
+                message: isEdit
+                        ? `Ya existe otra contraseña para el sitio '${duplicate.site}' con el usuario '${duplicate.username}'.\n\nSi guardas los cambios con estos datos, se fusionarán con la entrada existente.`
+                        : `Ya existe una contraseña para el sitio '${duplicate.site}' con el usuario '${duplicate.username}'.\n\nRecomendamos actualizar la entrada existente para mantener la bóveda ordenada. ¿Qué deseas hacer?`,
+                type: 'warning',
+                confirmText: 'Actualizar existente',
+                cancelText: 'Guardar como nueva',
+                onConfirm: () => {
+                    const mergedData = { ...entryData, id: duplicate.id };
+                    applySavePassword(mergedData);
+                },
+                onCancel: () => {
+                    applySavePassword(entryData);
+                },
+            });
+            setIsPasswordModalOpen(false);
+            return;
+        }
+
+        applySavePassword(entryData);
     };
 
     const handleEdit = (entry: PasswordEntry) => {
@@ -279,7 +426,8 @@ const App: React.FC = () => {
             cancelText: 'Cancelar',
             onConfirm: () => {
                  setPasswords(passwords.filter(p => p.id !== id));
-            }
+            },
+            onCancel: undefined,
         });
     };
     
@@ -544,17 +692,56 @@ const App: React.FC = () => {
                 isOpen={isImportExportModalOpen}
                 onClose={() => setIsImportExportModalOpen(false)}
                 onImport={(importedPasswords: PasswordEntry[]) => {
-                    // Obtener la preferencia de importación guardada
                     const importMode = localStorage.getItem('vault_last_import_mode') as 'merge' | 'overwrite' || 'merge';
-                    
+
                     if (importMode === 'overwrite') {
-                        // Reemplazar todas las contraseñas existentes
                         setPasswords(importedPasswords);
                     } else {
-                        // Merge: agregar las nuevas, evitando duplicados por ID
                         const existingIds = new Set(passwords.map(p => p.id));
-                        const newPasswords = importedPasswords.filter((p: PasswordEntry) => !existingIds.has(p.id));
-                        setPasswords([...passwords, ...newPasswords]);
+                        const existingKeys = new Set(
+                            passwords.map(p => `${p.site.trim().toLowerCase()}|${p.username.trim().toLowerCase()}`)
+                        );
+
+                        let updatedList = [...passwords];
+                        let mergedCount = 0;
+                        let skippedId = 0;
+
+                        for (const imported of importedPasswords) {
+                            if (existingIds.has(imported.id)) {
+                                skippedId += 1;
+                                continue;
+                            }
+                            const key = `${imported.site.trim().toLowerCase()}|${imported.username.trim().toLowerCase()}`;
+                            if (existingKeys.has(key)) {
+                                const idx = updatedList.findIndex(
+                                    p => `${p.site.trim().toLowerCase()}|${p.username.trim().toLowerCase()}` === key
+                                );
+                                if (idx !== -1) {
+                                    updatedList[idx] = { ...updatedList[idx], ...imported, id: updatedList[idx].id, createdAt: updatedList[idx].createdAt };
+                                    mergedCount += 1;
+                                }
+                                continue;
+                            }
+                            existingKeys.add(key);
+                            updatedList.push(imported);
+                        }
+
+                        setPasswords(updatedList);
+
+                        if (mergedCount > 0) {
+                            setMessageModal({
+                                isOpen: true,
+                                title: 'Importación completada',
+                                message:
+                                    `Se importaron ${importedPasswords.length - skippedId - mergedCount} contraseñas nuevas.\n` +
+                                    `${mergedCount} fueron fusionadas con entradas existentes (mismo sitio + usuario).`,
+                                type: 'info',
+                                onConfirm: undefined,
+                                onCancel: undefined,
+                                confirmText: 'Entendido',
+                                cancelText: undefined,
+                            });
+                        }
                     }
                 }}
                 onExportSuccess={handleExportSuccess}

@@ -8,17 +8,19 @@ interface MessageModalProps {
   message: string;
   type?: 'error' | 'success' | 'info' | 'warning';
   onConfirm?: () => void;
+  onCancel?: () => void;
   confirmText?: string;
   cancelText?: string;
 }
 
-const MessageModal: React.FC<MessageModalProps> = ({ 
-    isOpen, 
-    onClose, 
-    title, 
-    message, 
+const MessageModal: React.FC<MessageModalProps> = ({
+    isOpen,
+    onClose,
+    title,
+    message,
     type = 'info',
     onConfirm,
+    onCancel,
     confirmText = 'Aceptar',
     cancelText = 'Cancelar'
 }) => {
@@ -61,24 +63,38 @@ const MessageModal: React.FC<MessageModalProps> = ({
 
         {/* Footer */}
         <div className="p-4 border-t border-gray-700 bg-gray-900/30 flex justify-center space-x-3">
-          {onConfirm && (
-              <button 
-                onClick={onClose}
+          {(onConfirm || onCancel) && (
+              <button
+                onClick={() => {
+                    if (onCancel) onCancel();
+                    onClose();
+                }}
                 className="px-6 py-2 bg-gray-700 hover:bg-gray-600 text-gray-200 font-bold rounded-lg transition-all"
               >
                 {cancelText}
               </button>
           )}
-          
-          <button 
-            onClick={() => {
-                if (onConfirm) onConfirm();
-                onClose();
-            }}
-            className={`px-8 py-2 ${bgColor} hover:brightness-110 text-white font-bold rounded-lg transition-all shadow-lg transform hover:scale-105 active:scale-95`}
-          >
-            {confirmText}
-          </button>
+
+          {onConfirm && (
+            <button
+              onClick={() => {
+                  onConfirm();
+                  onClose();
+              }}
+              className={`px-8 py-2 ${bgColor} hover:brightness-110 text-white font-bold rounded-lg transition-all shadow-lg transform hover:scale-105 active:scale-95`}
+            >
+              {confirmText}
+            </button>
+          )}
+
+          {!onConfirm && !onCancel && (
+            <button
+              onClick={onClose}
+              className={`px-8 py-2 ${bgColor} hover:brightness-110 text-white font-bold rounded-lg transition-all shadow-lg transform hover:scale-105 active:scale-95`}
+            >
+              {confirmText}
+            </button>
+          )}
         </div>
 
       </div>
