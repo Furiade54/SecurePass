@@ -12,8 +12,11 @@
   },
   "dependencies": {
     "crypto-js": "^4.2.0",
+    "html5-qrcode": "^2.3.8",
+    "jsqr": "^1.4.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "react-qr-code": "^2.2.0",
     "react-window": "^1.8.11"
   },
   "devDependencies": {

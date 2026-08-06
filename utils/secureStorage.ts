@@ -40,7 +40,7 @@ export class SecureStorageService {
   }
 
   /**
-   * Initialize the secure storage with master password
+   * Initialize the secure storage with the gesture pattern as unlock key
    */
   initialize(config: SecureStorageConfig): void {
     this.masterPassword = config.masterPassword;
@@ -171,7 +171,7 @@ export class SecureStorageService {
       } else {
         // Legacy plaintext data found - migrate to encrypted storage
         console.warn(`Migrating legacy plaintext data for key: ${key}`);
-        // Only migrate if we have the master password (which we should if we are unlocked)
+        // Only migrate if we have the unlock key (gesture pattern in memory, present while unlocked)
         if (this.masterPassword) {
             this.set(key, parsedData);
         }

@@ -1,7 +1,13 @@
-import React, { useState, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import QRCode from 'react-qr-code';
+import { Html5Qrcode } from 'html5-qrcode';
+import jsQR from 'jsqr';
 import { PasswordEntry } from '../types';
-import { EncryptionService } from '../utils/encryption';
+import { EncryptedData, EncryptionService } from '../utils/encryption';
 import { ImportExportIcon } from './Icons';
+import GesturePad from './GesturePad';
+
+const patternToString = (pattern: number[]): string => pattern.join(',');
 
 interface ImportExportModalProps {
   isOpen: boolean;
@@ -11,56 +17,579 @@ interface ImportExportModalProps {
   passwords: PasswordEntry[];
 }
 
-const ImportExportModal: React.FC<ImportExportModalProps> = ({ 
-  isOpen, 
-  onClose, 
+type Mode = 'select' | 'export' | 'import' | 'shareQR' | 'scanQR';
+type ImportMode = 'merge' | 'overwrite';
+type ScanSource = 'camera' | 'image' | null;
+
+type QRSharePayload = QRSharePayloadV2 | QRSharePayloadV3;
+
+interface QRSharePayloadV2 {
+  app: 'SecurePass';
+  version: '2.0';
+  type: 'password-share';
+  timestamp: number;
+  encrypted: EncryptedData;
+}
+
+interface QRSharePayloadV3 {
+  app: 'SecurePass';
+  version: '3.0';
+  type: 'password-share';
+  timestamp: number;
+  transferId: string;
+  chunkIndex: number;
+  totalChunks: number;
+  encryptedChunk: string;
+}
+
+interface ReceivedChunksMap {
+  [transferId: string]: {
+    totalChunks: number;
+    chunks: { [chunkIndex: number]: string };
+  };
+}
+
+interface QRTransferPassword {
+  site: string;
+  username: string;
+  password: string;
+  category: string;
+}
+
+const QR_READER_ELEMENT_ID = 'securepass-qr-reader';
+const QR_IMAGE_WORKER_ELEMENT_ID = 'securepass-qr-image-worker';
+const MAX_QR_PAYLOAD_BYTES = 1200;
+const QR_V3_FIXED_OVERHEAD_ESTIMATE_BYTES = 220;
+const QR_IMAGE_ERROR_MESSAGE = 'No se detecto un QR legible. Usa una imagen con el codigo completo y buena resolucion.';
+
+const normalizePasswords = (rawPasswords: any[]): PasswordEntry[] => {
+  return rawPasswords.map((password) => ({
+    id: password.id || crypto.randomUUID(),
+    site: password.site,
+    username: password.username,
+    password: password.password,
+    category: password.category || 'Uncategorized',
+    createdAt: password.createdAt || Date.now()
+  }));
+};
+
+const utf8ToBase64Safe = (value: string): string => {
+  const bytes = new TextEncoder().encode(value);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const slice = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...slice);
+  }
+  return btoa(binary);
+};
+
+const base64SafeToUtf8 = (value: string): string => {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new TextDecoder('utf-8').decode(bytes);
+};
+
+const generateTransferId = (): string => {
+  const bytes = new Uint8Array(6);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+};
+
+const splitStringIntoChunks = (value: string, chunkSize: number): string[] => {
+  const out: string[] = [];
+  for (let i = 0; i < value.length; i += chunkSize) {
+    out.push(value.slice(i, i + chunkSize));
+  }
+  return out;
+};
+
+const estimateChunkSizeForEncryptedChunk = (transferId: string, totalChunks: number): number => {
+  const skeleton: QRSharePayloadV3 = {
+    app: 'SecurePass',
+    version: '3.0',
+    type: 'password-share',
+    timestamp: Date.now(),
+    transferId,
+    chunkIndex: totalChunks,
+    totalChunks,
+    encryptedChunk: ''
+  };
+  const skeletonBytes = new TextEncoder().encode(JSON.stringify(skeleton)).length;
+  const safeOverhead = skeletonBytes + 24;
+  const remaining = Math.max(16, MAX_QR_PAYLOAD_BYTES - safeOverhead);
+  return Math.max(32, remaining);
+};
+
+const estimateQRChunksNeeded = (
+  payload: { passwords: QRTransferPassword[] },
+  patternStr: string
+): number => {
+  try {
+    const encrypted = EncryptionService.encrypt(JSON.stringify(payload), patternStr);
+    const encryptedStr = JSON.stringify(encrypted);
+    const b64 = utf8ToBase64Safe(encryptedStr);
+    const transferId = generateTransferId();
+    let chunkSize = estimateChunkSizeForEncryptedChunk(transferId, 2);
+    let chunks = splitStringIntoChunks(b64, chunkSize);
+    chunkSize = estimateChunkSizeForEncryptedChunk(transferId, chunks.length);
+    chunks = splitStringIntoChunks(b64, chunkSize);
+    return chunks.length;
+  } catch {
+    return 1;
+  }
+};
+
+const roughEstimateQRChunks = (passwordsForTransfer: QRTransferPassword[]): number => {
+  if (passwordsForTransfer.length === 0) return 0;
+  const roughSingleEntryBytes =
+    JSON.stringify(passwordsForTransfer[0]).length + 16;
+  const rawBytes =
+    48 + passwordsForTransfer.length * Math.max(120, roughSingleEntryBytes);
+  const encryptedRough = rawBytes * 1.25 + 160;
+  const b64Rough = Math.ceil(encryptedRough * 1.34);
+  const skeletonBytes = QR_V3_FIXED_OVERHEAD_ESTIMATE_BYTES;
+  const perChunk = Math.max(64, MAX_QR_PAYLOAD_BYTES - skeletonBytes);
+  return Math.max(1, Math.ceil(b64Rough / perChunk));
+};
+
+const isValidQRPayload = (payload: any): payload is QRSharePayload => {
+  if (
+    !payload ||
+    payload.app !== 'SecurePass' ||
+    payload.type !== 'password-share' ||
+    typeof payload.version !== 'string' ||
+    typeof payload.timestamp !== 'number'
+  ) {
+    return false;
+  }
+  if (payload.version === '2.0') {
+    return !!(
+      payload.encrypted &&
+      typeof payload.encrypted.data === 'string' &&
+      typeof payload.encrypted.iv === 'string' &&
+      typeof payload.encrypted.salt === 'string'
+    );
+  }
+  if (payload.version === '3.0') {
+    return !!(
+      typeof payload.transferId === 'string' &&
+      typeof payload.chunkIndex === 'number' &&
+      typeof payload.totalChunks === 'number' &&
+      typeof payload.encryptedChunk === 'string' &&
+      payload.totalChunks >= 1 &&
+      payload.chunkIndex >= 1 &&
+      payload.chunkIndex <= payload.totalChunks
+    );
+  }
+  return false;
+};
+
+const serializeUnknownError = (error: unknown): string => {
+  if (error == null) return 'sin detalles';
+  if (typeof error === 'string') return error || 'error vacío';
+  if (error instanceof Error) return error.message || error.name || 'Error sin mensaje';
+  try {
+    const asAny = error as any;
+    if (typeof asAny.message === 'string' && asAny.message) return asAny.message;
+    if (typeof asAny.name === 'string' && asAny.name) return asAny.name;
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+};
+
+const loadImageFromFile = (file: File): Promise<HTMLImageElement> =>
+  new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        resolve(img);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('No se pudo decodificar la imagen (formato no soportado o corrupto).'));
+    };
+    img.src = url;
+  });
+
+const extractImageData = (
+  img: HTMLImageElement,
+  targetSize: number,
+  paddingPct: number
+): ImageData => {
+  const canvas = document.createElement('canvas');
+  const paddingPx = Math.max(0, Math.floor(targetSize * paddingPct));
+  const inner = targetSize - paddingPx * 2;
+  canvas.width = targetSize;
+  canvas.height = targetSize;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('No se pudo obtener contexto de canvas.');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.imageSmoothingEnabled = targetSize > Math.max(img.width, img.height);
+  ctx.drawImage(img, paddingPx, paddingPx, inner, inner);
+  return ctx.getImageData(0, 0, canvas.width, canvas.height);
+};
+
+const ensureQrImageWorkerElement = (): HTMLElement => {
+  let el = document.getElementById(QR_IMAGE_WORKER_ELEMENT_ID);
+  if (el) return el;
+  el = document.createElement('div');
+  el.id = QR_IMAGE_WORKER_ELEMENT_ID;
+  Object.assign((el as HTMLDivElement).style, {
+    position: 'fixed',
+    left: '-10000px',
+    top: '-10000px',
+    width: '640px',
+    height: '480px',
+    visibility: 'hidden',
+    opacity: '0',
+    pointerEvents: 'none'
+  });
+  document.body.appendChild(el);
+  return el;
+};
+
+const removeQrImageWorkerElement = (): void => {
+  const el = document.getElementById(QR_IMAGE_WORKER_ELEMENT_ID);
+  if (el && el.parentNode) el.parentNode.removeChild(el);
+};
+
+const tryDecodeWithHtml5Qr = async (
+  imageDataList: ImageData[],
+  capturedErrors: string[]
+): Promise<string | null> => {
+  let scanner: Html5Qrcode | null = null;
+  try {
+    ensureQrImageWorkerElement();
+    scanner = new Html5Qrcode(QR_IMAGE_WORKER_ELEMENT_ID);
+    for (const imageData of imageDataList) {
+      try {
+        const tmpCanvas = document.createElement('canvas');
+        tmpCanvas.width = imageData.width;
+        tmpCanvas.height = imageData.height;
+        const tctx = tmpCanvas.getContext('2d');
+        if (!tctx) continue;
+        tctx.putImageData(imageData, 0, 0);
+        const blob: Blob | null = await new Promise((resolveBlob) =>
+          tmpCanvas.toBlob((b) => resolveBlob(b), 'image/png')
+        );
+        if (!blob) continue;
+        const fileLike = new File([blob], 'qr-candidate.png', { type: 'image/png' });
+        const decodedText = await scanner.scanFile(fileLike);
+        if (decodedText && typeof decodedText === 'string' && decodedText.trim().length > 0) {
+          return decodedText;
+        }
+      } catch (scanErr) {
+        capturedErrors.push('html5: ' + serializeUnknownError(scanErr));
+      }
+    }
+    return null;
+  } finally {
+    try {
+      scanner?.clear();
+    } catch {
+      // ignore cleanup
+    }
+  }
+};
+
+const tryDecodeWithJsQr = (imageDataList: ImageData[], capturedErrors: string[]): string | null => {
+  for (const imageData of imageDataList) {
+    try {
+      const code = jsQR(imageData.data, imageData.width, imageData.height, {
+        inversionAttempts: 'attemptBoth'
+      });
+      if (code && code.data && code.data.trim().length > 0) {
+        return code.data;
+      }
+    } catch (err) {
+      capturedErrors.push('jsqr: ' + serializeUnknownError(err));
+    }
+  }
+  return null;
+};
+
+const decodeQrFromFileRobust = async (
+  file: File,
+  diagnosticsRef: { html5: string[]; jsqr: string[] }
+): Promise<string> => {
+  const img = await loadImageFromFile(file);
+  const originalMax = Math.max(img.width, img.height, 1);
+  const candidateSizes = Array.from(
+    new Set(
+      [
+        originalMax,
+        1200,
+        900,
+        1600,
+        640,
+        2000
+      ].map((s) => Math.max(200, Math.min(2600, s)))
+    )
+  ).sort((a, b) => b - a);
+
+  const imageDataList: ImageData[] = [];
+  for (const size of candidateSizes) {
+    for (const pad of [0, 0.08, 0.16]) {
+      try {
+        imageDataList.push(extractImageData(img, size, pad));
+      } catch {
+        // skip variant
+      }
+    }
+  }
+
+  const html5Errors: string[] = [];
+  const html5Result = await tryDecodeWithHtml5Qr(imageDataList, html5Errors);
+  diagnosticsRef.html5 = html5Errors;
+  if (html5Result) return html5Result;
+
+  const jsqrErrors: string[] = [];
+  const jsQRResult = tryDecodeWithJsQr(imageDataList, jsqrErrors);
+  diagnosticsRef.jsqr = jsqrErrors;
+  if (jsQRResult) return jsQRResult;
+
+  const firstHtml = html5Errors[0];
+  const firstJs = jsqrErrors[0];
+  const note =
+    firstHtml || firstJs
+      ? ` (html5-qr: ${serializeUnknownError(firstHtml || '')} · jsQR: ${serializeUnknownError(
+          firstJs || ''
+        )})`
+      : '';
+  throw new Error(
+    'Ningun decoder pudo leer el QR. Asegurate de que el codigo tenga borde blanco, este enfocado y no este cortado.' +
+      note
+  );
+};
+
+const sanitizePasswordsForQR = (entries: PasswordEntry[]): QRTransferPassword[] => {
+  return entries.map((entry) => ({
+    site: entry.site,
+    username: entry.username,
+    password: entry.password,
+    category: entry.category || 'Uncategorized'
+  }));
+};
+
+const ImportExportModal: React.FC<ImportExportModalProps> = ({
+  isOpen,
+  onClose,
   onImport,
   onExportSuccess,
-  passwords 
+  passwords
 }) => {
-  const [mode, setMode] = useState<'select' | 'export' | 'import'>('select');
-  const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-  const [importMode, setImportMode] = useState<'merge' | 'overwrite'>('merge');
+  const [mode, setMode] = useState<Mode>('select');
+  const [backupPattern, setBackupPattern] = useState<number[] | null>(null);
+  const [backupConfirmPattern, setBackupConfirmPattern] = useState<number[] | null>(null);
+  const [backupConfirmStep, setBackupConfirmStep] = useState(false);
+  const [backupPatternReset, setBackupPatternReset] = useState(0);
+  const [importMode, setImportMode] = useState<ImportMode>('merge');
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [selectedFileName, setSelectedFileName] = useState('');
+  const [selectedPasswordIds, setSelectedPasswordIds] = useState<string[]>([]);
+  const [qrSharePattern, setQrSharePattern] = useState<number[] | null>(null);
+  const [qrSharePatternReset, setQrSharePatternReset] = useState(0);
+  const [shareQRStep, setShareQRStep] = useState<1 | 2 | 3>(1);
+  const [shareQRAnimKey, setShareQRAnimKey] = useState(0);
+  const [generatedQRData, setGeneratedQRData] = useState('');
+  const [generatedQRChunks, setGeneratedQRChunks] = useState<string[]>([]);
+  const [currentQRChunkIndex, setCurrentQRChunkIndex] = useState(0);
+  const [pendingQRPayload, setPendingQRPayload] = useState<QRSharePayload | null>(null);
+  const [qrImportPattern, setQrImportPattern] = useState<number[] | null>(null);
+  const [qrImportPatternReset, setQrImportPatternReset] = useState(0);
+  const [scannedPasswords, setScannedPasswords] = useState<PasswordEntry[]>([]);
+  const [scanSource, setScanSource] = useState<ScanSource>(null);
+  const [selectedImageName, setSelectedImageName] = useState('');
+  const [receivedChunks, setReceivedChunks] = useState<ReceivedChunksMap>({});
+  const [activeTransferId, setActiveTransferId] = useState<string | null>(null);
+  const [scannerRestartKey, setScannerRestartKey] = useState(0);
+  const [scanQRStep, setScanQRStep] = useState<1 | 2 | 3>(1);
+  const [scanQRAnimKey, setScanQRAnimKey] = useState(0);
+  const [importPattern, setImportPattern] = useState<number[] | null>(null);
+  const [importPatternReset, setImportPatternReset] = useState(0);
+  const [patternError, setPatternError] = useState<string>('');
+  const vaultFileInputRef = useRef<HTMLInputElement>(null);
+  const imageFileInputRef = useRef<HTMLInputElement>(null);
+  const qrCodeContainerRef = useRef<HTMLDivElement>(null);
+  const qrScannerRef = useRef<Html5Qrcode | null>(null);
+  const isScannerRunningRef = useRef(false);
+  const isScanLockedRef = useRef(false);
+  const scanQRAutoDecryptGuardRef = useRef<string>('');
+  const shareQRAutoGenerateGuardRef = useRef<string>('');
 
-  // Cargar preferencia de importación guardada
-  const [lastImportMode, setLastImportMode] = useState<'merge' | 'overwrite'>(
-    () => {
-      const saved = localStorage.getItem('vault_last_import_mode');
-      return (saved as 'merge' | 'overwrite') || 'merge';
+  useEffect(() => {
+    if (patternError) {
+      const t = setTimeout(() => setPatternError(''), 1200);
+      return () => clearTimeout(t);
     }
-  );
+  }, [patternError]);
 
-  const resetForm = () => {
-    setPassword('');
-    setConfirmPassword('');
+  const [lastImportMode, setLastImportMode] = useState<ImportMode>(() => {
+    const saved = localStorage.getItem('vault_last_import_mode');
+    return (saved as ImportMode) || 'merge';
+  });
+
+  const stopQRScanner = useCallback(async () => {
+    const scanner = qrScannerRef.current;
+    if (!scanner) return;
+
+    try {
+      if (isScannerRunningRef.current) {
+        await scanner.stop();
+      }
+    } catch {
+      // Ignore cleanup errors when the scanner is already stopped
+    }
+
+    try {
+      scanner.clear();
+    } catch {
+      // Ignore cleanup errors when the scanner container is already cleared
+    }
+
+    qrScannerRef.current = null;
+    isScannerRunningRef.current = false;
+  }, []);
+
+  const resetQRImportState = useCallback(() => {
+    isScanLockedRef.current = false;
+    scanQRAutoDecryptGuardRef.current = '';
+    setPendingQRPayload(null);
+    setQrImportPattern(null);
+    setQrImportPatternReset((k) => k + 1);
+    setScannedPasswords([]);
+    setScanSource(null);
+    setSelectedImageName('');
+    setReceivedChunks({});
+    setActiveTransferId(null);
+    setScanQRStep(1);
+  }, []);
+
+  const resetForm = useCallback(() => {
+    setBackupPattern(null);
+    setBackupConfirmPattern(null);
+    setBackupConfirmStep(false);
+    setBackupPatternReset((k) => k + 1);
     setError('');
     setSuccess('');
     setMode('select');
     setImportMode(lastImportMode);
-  };
+    setSelectedFileName('');
+    setSelectedPasswordIds([]);
+    setQrSharePattern(null);
+    setQrSharePatternReset((k) => k + 1);
+    setShareQRStep(1);
+    setGeneratedQRData('');
+    setGeneratedQRChunks([]);
+    setCurrentQRChunkIndex(0);
+    shareQRAutoGenerateGuardRef.current = '';
+    setImportPattern(null);
+    setImportPatternReset((k) => k + 1);
+    setPatternError('');
+    resetQRImportState();
+    removeQrImageWorkerElement();
+  }, [lastImportMode, resetQRImportState]);
 
-  const handleClose = () => {
+  const handleClose = useCallback(async () => {
+    await stopQRScanner();
     resetForm();
     onClose();
+  }, [onClose, resetForm, stopQRScanner]);
+
+  const changeMode = async (nextMode: Mode) => {
+    if (mode === 'scanQR' && nextMode !== 'scanQR') {
+      await stopQRScanner();
+    }
+
+    setError('');
+    setSuccess('');
+    setPatternError('');
+    setMode(nextMode);
+
+    if (nextMode !== 'export') {
+      setBackupPattern(null);
+      setBackupConfirmPattern(null);
+      setBackupConfirmStep(false);
+      setBackupPatternReset((k) => k + 1);
+    }
+
+    if (nextMode !== 'import') {
+      setSelectedFileName('');
+      setImportPattern(null);
+      setImportPatternReset((k) => k + 1);
+      if (vaultFileInputRef.current) {
+        vaultFileInputRef.current.value = '';
+      }
+    }
+
+    if (nextMode !== 'shareQR') {
+      setSelectedPasswordIds([]);
+      setQrSharePattern(null);
+      setQrSharePatternReset((k) => k + 1);
+      setShareQRStep(1);
+      setGeneratedQRData('');
+      setGeneratedQRChunks([]);
+      setCurrentQRChunkIndex(0);
+      shareQRAutoGenerateGuardRef.current = '';
+    }
+
+    if (nextMode !== 'scanQR') {
+      resetQRImportState();
+      if (imageFileInputRef.current) {
+        imageFileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const handleExportBackupPattern = (pattern: number[]) => {
+    if (!backupConfirmStep) {
+      setBackupPattern(pattern);
+      setBackupConfirmStep(true);
+      setBackupPatternReset((k) => k + 1);
+      setSuccess('Patrón guardado. Dibuja el mismo patrón para confirmar.');
+    } else {
+      if (JSON.stringify(backupPattern) !== JSON.stringify(pattern)) {
+        setPatternError('Los patrones no coinciden.');
+        setBackupConfirmStep(false);
+        setBackupPattern(null);
+        setBackupConfirmPattern(null);
+        setBackupPatternReset((k) => k + 1);
+        setError('');
+        return;
+      }
+      setBackupConfirmPattern(pattern);
+      setPatternError('');
+      void handleExport();
+    }
   };
 
   const handleExport = async () => {
-    if (!password) {
-      setError('Por favor ingresa una contraseña para proteger el archivo');
+    if (!backupPattern || !backupConfirmPattern) {
+      setError('Dibuja y confirma el patrón de protección del respaldo');
       return;
     }
 
-    if (password !== confirmPassword) {
-      setError('Las contraseñas no coinciden');
+    if (JSON.stringify(backupPattern) !== JSON.stringify(backupConfirmPattern)) {
+      setError('Los patrones no coinciden');
+      setBackupConfirmStep(false);
+      setBackupPattern(null);
+      setBackupConfirmPattern(null);
+      setBackupPatternReset((k) => k + 1);
       return;
     }
 
     try {
-      // Crear objeto de datos para exportar
       const exportData = {
         version: '1.0',
         timestamp: Date.now(),
@@ -72,15 +601,13 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
         }
       };
 
-      // Encriptar datos
       const jsonData = JSON.stringify(exportData);
-      const encrypted = EncryptionService.encrypt(jsonData, password);
+      const encrypted = EncryptionService.encrypt(jsonData, patternToString(backupPattern));
 
-      // Crear archivo para descargar
-      const fileName = `vault-backup-${new Date().toISOString().split('T')[0]}.vault`;
+      const fileName = `respaldo-boveda-${new Date().toISOString().split('T')[0]}.vault`;
       const blob = new Blob([JSON.stringify(encrypted)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
-      
+
       const a = document.createElement('a');
       a.href = url;
       a.download = fileName;
@@ -91,19 +618,21 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
 
       setSuccess('Archivo exportado exitosamente');
       if (onExportSuccess) onExportSuccess();
-      setTimeout(() => handleClose(), 2000);
+      setTimeout(() => {
+        void handleClose();
+      }, 2000);
     } catch (error) {
       setError('Error al exportar: ' + (error as Error).message);
     }
   };
 
   const handleImport = async () => {
-    if (!password) {
-      setError('Por favor ingresa la contraseña del archivo');
+    if (!importPattern) {
+      setError('Dibuja el patrón de desbloqueo del respaldo');
       return;
     }
 
-    const file = fileInputRef.current?.files?.[0];
+    const file = vaultFileInputRef.current?.files?.[0];
     if (!file) {
       setError('Por favor selecciona un archivo');
       return;
@@ -112,74 +641,788 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
     try {
       const text = await file.text();
       const encrypted = JSON.parse(text);
-      
-      // Desencriptar datos
-      const decryptedJson = EncryptionService.decrypt(encrypted, password);
+      const decryptedJson = EncryptionService.decrypt(encrypted, patternToString(importPattern));
       const importData = JSON.parse(decryptedJson);
 
-      // Validar formato
       if (!importData.passwords || !Array.isArray(importData.passwords)) {
         throw new Error('Formato de archivo inválido');
       }
 
-      // Guardar preferencia de importación
       localStorage.setItem('vault_last_import_mode', importMode);
       setLastImportMode(importMode);
 
-      // Procesar contraseñas importadas
-      const importedPasswords: PasswordEntry[] = importData.passwords.map((p: any) => ({
-        id: p.id || crypto.randomUUID(),
-        site: p.site,
-        username: p.username,
-        password: p.password,
-        category: p.category || 'Uncategorized',
-        createdAt: p.createdAt || Date.now()
-      }));
+      const importedPasswords = normalizePasswords(importData.passwords);
 
       onImport(importedPasswords);
       setSuccess('Archivo importado exitosamente');
-      setTimeout(() => handleClose(), 2000);
+      setTimeout(() => {
+        void handleClose();
+      }, 2000);
     } catch (error) {
       setError('Error al importar: ' + (error as Error).message);
     }
   };
 
-  const handleFileSelect = () => {
-    fileInputRef.current?.click();
+  const handleGenerateQR = () => {
+    const selectedPasswords = passwords.filter((password) =>
+      selectedPasswordIds.includes(password.id)
+    );
+
+    if (selectedPasswords.length === 0) {
+      setError('Selecciona al menos una contraseña para enviar');
+      return false;
+    }
+
+    if (!qrSharePattern) {
+      setError('Dibuja el patrón de desbloqueo de este dispositivo para generar el QR');
+      return false;
+    }
+
+    try {
+      const encrypted = EncryptionService.encrypt(
+        JSON.stringify({ passwords: sanitizePasswordsForQR(selectedPasswords) }),
+        patternToString(qrSharePattern)
+      );
+
+      const encryptedStr = JSON.stringify(encrypted);
+      const b64Encrypted = utf8ToBase64Safe(encryptedStr);
+      const transferId = generateTransferId();
+
+      const provisionalChunkSize = estimateChunkSizeForEncryptedChunk(transferId, 2);
+      const provisionalChunks = splitStringIntoChunks(b64Encrypted, provisionalChunkSize);
+      const finalChunkSize = estimateChunkSizeForEncryptedChunk(transferId, provisionalChunks.length);
+      const finalChunks = splitStringIntoChunks(b64Encrypted, finalChunkSize);
+
+      const timestamp = Date.now();
+
+      if (finalChunks.length === 1) {
+        const payload: QRSharePayloadV2 = {
+          app: 'SecurePass',
+          version: '2.0',
+          type: 'password-share',
+          timestamp,
+          encrypted
+        };
+        const qrString = JSON.stringify(payload);
+        const payloadSize = new TextEncoder().encode(qrString).length;
+        if (payloadSize > MAX_QR_PAYLOAD_BYTES) {
+          throw new Error(
+            'Error interno al generar el QR (límite de tamaño excedido para 1 QR). Reduce ligeramente la selección y reinténtalo.'
+          );
+        }
+        setGeneratedQRChunks([qrString]);
+        setCurrentQRChunkIndex(0);
+        setGeneratedQRData(qrString);
+        setSuccess('QR generado. Escanéalo o impórtalo desde imagen en el otro dispositivo.');
+        setError('');
+        return true;
+      }
+
+      const qrStrings: string[] = [];
+      finalChunks.forEach((chunkStr, idx) => {
+        const payload: QRSharePayloadV3 = {
+          app: 'SecurePass',
+          version: '3.0',
+          type: 'password-share',
+          timestamp,
+          transferId,
+          chunkIndex: idx + 1,
+          totalChunks: finalChunks.length,
+          encryptedChunk: chunkStr
+        };
+        const qrString = JSON.stringify(payload);
+        const payloadSize = new TextEncoder().encode(qrString).length;
+        if (payloadSize > MAX_QR_PAYLOAD_BYTES) {
+          throw new Error(
+            'Error interno al fragmentar el QR (fragmento ' +
+              (idx + 1) +
+              ' excede el límite). Reduce ligeramente la selección y reinténtalo.'
+          );
+        }
+        qrStrings.push(qrString);
+      });
+
+      setGeneratedQRChunks(qrStrings);
+      setCurrentQRChunkIndex(0);
+      setGeneratedQRData(qrStrings[0] || '');
+      setSuccess(
+        `Transferencia preparada: ${qrStrings.length} códigos QR. Muéstralos todos al otro dispositivo en orden.`
+      );
+      setError('');
+      return true;
+    } catch (error) {
+      setGeneratedQRChunks([]);
+      setCurrentQRChunkIndex(0);
+      setGeneratedQRData('');
+      setError('Error al generar el QR: ' + (error as Error).message);
+      return false;
+    }
   };
+
+  const handleSaveQRImage = async () => {
+    const qrSvg = qrCodeContainerRef.current?.querySelector('svg');
+    if (!qrSvg || !generatedQRData) {
+      setError('Genera el QR antes de guardarlo como imagen.');
+      return;
+    }
+
+    try {
+      const logicalSize = 260;
+      if (!qrSvg.getAttribute('width')) qrSvg.setAttribute('width', String(logicalSize));
+      if (!qrSvg.getAttribute('height')) qrSvg.setAttribute('height', String(logicalSize));
+      if (!qrSvg.getAttribute('viewBox')) qrSvg.setAttribute('viewBox', `0 0 ${logicalSize} ${logicalSize}`);
+      if (!qrSvg.getAttribute('xmlns')) qrSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+
+      const svgMarkup = new XMLSerializer().serializeToString(qrSvg);
+      const svgBlob = new Blob([svgMarkup], { type: 'image/svg+xml;charset=utf-8' });
+      const svgUrl = URL.createObjectURL(svgBlob);
+
+      const canvasSize = 1080;
+      const paddingPx = 80;
+      const innerSize = canvasSize - paddingPx * 2;
+
+      const image = new Image();
+      image.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = canvasSize;
+          canvas.height = canvasSize;
+          const context = canvas.getContext('2d');
+
+          if (!context) {
+            URL.revokeObjectURL(svgUrl);
+            setError('No se pudo preparar la imagen del QR para guardarla.');
+            return;
+          }
+
+          context.fillStyle = '#ffffff';
+          context.fillRect(0, 0, canvas.width, canvas.height);
+          context.imageSmoothingEnabled = false;
+          context.drawImage(image, paddingPx, paddingPx, innerSize, innerSize);
+
+          const pngUrl = canvas.toDataURL('image/png');
+          const link = document.createElement('a');
+          link.href = pngUrl;
+          link.download = `securepass-qr-${new Date().toISOString().split('T')[0]}.png`;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          URL.revokeObjectURL(svgUrl);
+          setSuccess('QR guardado como imagen PNG.');
+          setError('');
+        } catch (drawError) {
+          console.error('[handleSaveQRImage] Error al dibujar QR en canvas:', drawError);
+          URL.revokeObjectURL(svgUrl);
+          setError('No se pudo guardar el QR como imagen: ' + (drawError as Error).message);
+        }
+      };
+
+      image.onerror = () => {
+        URL.revokeObjectURL(svgUrl);
+        console.error('[handleSaveQRImage] Fallo onload del blob SVG (width/height intrínseco no detectado).');
+        setError('No se pudo guardar el QR como imagen.');
+      };
+
+      image.src = svgUrl;
+    } catch (error) {
+      console.error('[handleSaveQRImage] Error al guardar QR PNG:', error);
+      setError('Error al guardar el QR: ' + (error as Error).message);
+    }
+  };
+
+  const handleParsedQRPayload = useCallback(async (decodedText: string, source: Exclude<ScanSource, null>) => {
+    try {
+      const parsedPayload = JSON.parse(decodedText);
+
+      if (!isValidQRPayload(parsedPayload)) {
+        throw new Error('El QR no pertenece a una transferencia válida de SecurePass');
+      }
+
+      setError('');
+      setScannedPasswords([]);
+
+      if (parsedPayload.version === '2.0') {
+        if (source === 'camera') {
+          await stopQRScanner();
+        }
+        isScanLockedRef.current = true;
+        setPendingQRPayload(parsedPayload);
+        setQrImportPattern(null);
+        setQrImportPatternReset((k) => k + 1);
+        setScanSource(source);
+        setSuccess('QR leído correctamente. Dibuja el patrón del dispositivo origen para descifrar.');
+        return;
+      }
+
+      const v3 = parsedPayload as QRSharePayloadV3;
+
+      if (v3.totalChunks === 1) {
+        if (source === 'camera') {
+          await stopQRScanner();
+        }
+        isScanLockedRef.current = true;
+        setPendingQRPayload(v3);
+        setQrImportPattern(null);
+        setQrImportPatternReset((k) => k + 1);
+        setScanSource(source);
+        setSuccess('QR leído correctamente. Dibuja el patrón del dispositivo origen para descifrar.');
+        return;
+      }
+
+      if (source === 'camera') {
+        isScanLockedRef.current = true;
+      }
+      setScanSource(source);
+
+      let currentTransferId = activeTransferId;
+      let updatedChunks = { ...receivedChunks };
+
+      if (!currentTransferId) {
+        currentTransferId = v3.transferId;
+        setActiveTransferId(currentTransferId);
+      } else if (currentTransferId !== v3.transferId) {
+        setError('Se detectó un QR de otra transferencia. Usa ↺ Reiniciar lectura QR para comenzar una nueva.');
+        return;
+      }
+
+      const existing = updatedChunks[currentTransferId];
+      if (!existing) {
+        updatedChunks[currentTransferId] = {
+          totalChunks: v3.totalChunks,
+          chunks: {}
+        };
+      } else if (existing.totalChunks !== v3.totalChunks) {
+        setError('Inconsistencia en la transferencia (totalChunks distinto). Reinicia la lectura.');
+        return;
+      }
+
+      if (updatedChunks[currentTransferId].chunks[v3.chunkIndex]) {
+        setSuccess(`QR ${v3.chunkIndex}/${v3.totalChunks} ya estaba recibido. Escanea uno diferente.`);
+      } else {
+        updatedChunks[currentTransferId] = {
+          ...updatedChunks[currentTransferId],
+          chunks: {
+            ...updatedChunks[currentTransferId].chunks,
+            [v3.chunkIndex]: v3.encryptedChunk
+          }
+        };
+        setReceivedChunks(updatedChunks);
+        const receivedCount = Object.keys(updatedChunks[currentTransferId].chunks).length;
+        if (receivedCount === v3.totalChunks) {
+          if (source === 'camera') {
+            await stopQRScanner();
+          }
+          setPendingQRPayload({ ...v3 });
+          setQrImportPattern(null);
+          setQrImportPatternReset((k) => k + 1);
+          setSuccess(
+            `Transferencia completa (${v3.totalChunks} QR). Dibuja el patrón del dispositivo origen para descifrar.`
+          );
+        } else {
+          setSuccess(
+            `Recibido QR ${v3.chunkIndex}/${v3.totalChunks}. Faltan ${v3.totalChunks - receivedCount}.`
+          );
+          if (source === 'camera') {
+            setTimeout(() => {
+              isScanLockedRef.current = false;
+            }, 900);
+          }
+        }
+      }
+    } catch (error) {
+      setError('Error al leer el QR: ' + (error as Error).message);
+    }
+  }, [stopQRScanner, activeTransferId, receivedChunks]);
+
+  const handleDecryptScannedQR = async (): Promise<boolean> => {
+    if (!pendingQRPayload) {
+      const transferReady =
+        activeTransferId &&
+        receivedChunks[activeTransferId] &&
+        Object.keys(receivedChunks[activeTransferId].chunks).length ===
+          receivedChunks[activeTransferId].totalChunks;
+      if (!transferReady) {
+        setError('Primero debes escanear TODOS los códigos QR de la transferencia.');
+        return false;
+      }
+    }
+
+    if (!qrImportPattern) {
+      setError('Dibuja el patrón de desbloqueo del dispositivo origen');
+      return false;
+    }
+
+    try {
+      let encryptedData: EncryptedData;
+
+      if (pendingQRPayload && pendingQRPayload.version === '2.0') {
+        encryptedData = pendingQRPayload.encrypted;
+      } else {
+        const transferId =
+          (pendingQRPayload && (pendingQRPayload as QRSharePayloadV3).transferId) || activeTransferId;
+        if (!transferId) {
+          throw new Error('No hay una transferencia QR activa. Reinicia la lectura.');
+        }
+        const transfer = receivedChunks[transferId];
+        if (!transfer) {
+          throw new Error('No hay fragmentos recibidos. Escanea los códigos QR.');
+        }
+        const receivedKeys = Object.keys(transfer.chunks);
+        const receivedCount = receivedKeys.length;
+        if (receivedCount !== transfer.totalChunks) {
+          setError(
+            `Todavía faltan ${transfer.totalChunks - receivedCount} QR de ${transfer.totalChunks} totales.`
+          );
+          return false;
+        }
+        const sortedIndexes = receivedKeys
+          .map((k) => parseInt(k, 10))
+          .sort((a, b) => a - b);
+        const joinedB64 = sortedIndexes
+          .map((idx) => transfer.chunks[idx])
+          .join('');
+        let joinedEncryptedStr: string;
+        try {
+          joinedEncryptedStr = base64SafeToUtf8(joinedB64);
+        } catch {
+          throw new Error('No se pudo decodificar el contenido base64 de los QRs. Reinicia la lectura.');
+        }
+        let parsedEncrypted: EncryptedData;
+        try {
+          parsedEncrypted = JSON.parse(joinedEncryptedStr);
+        } catch {
+          throw new Error('No se pudo recomponer el contenido cifrado. Reinicia la lectura de QRs.');
+        }
+        if (
+          !parsedEncrypted ||
+          typeof parsedEncrypted.data !== 'string' ||
+          typeof parsedEncrypted.iv !== 'string' ||
+          typeof parsedEncrypted.salt !== 'string'
+        ) {
+          throw new Error('Contenido cifrado corrupto en la transferencia QR.');
+        }
+        encryptedData = parsedEncrypted;
+      }
+
+      const decryptedJson = EncryptionService.decrypt(
+        encryptedData,
+        patternToString(qrImportPattern)
+      );
+      const parsedData = JSON.parse(decryptedJson);
+
+      if (!parsedData.passwords || !Array.isArray(parsedData.passwords)) {
+        throw new Error('El contenido del QR no tiene un formato válido');
+      }
+
+      const importedPasswords = normalizePasswords(parsedData.passwords);
+
+      setScannedPasswords(importedPasswords);
+      setSuccess('Contraseñas descifradas correctamente. Revisa la vista previa antes de importar.');
+      setError('');
+      return true;
+    } catch {
+      setScannedPasswords([]);
+      setError('Patrón de desbloqueo incorrecto o contenido QR inválido. No se importó ninguna contraseña.');
+      return false;
+    }
+  };
+
+  const handleImportFromQR = async () => {
+    if (scannedPasswords.length === 0) {
+      setError('Todavía no hay contraseñas descifradas para importar');
+      return;
+    }
+
+    localStorage.setItem('vault_last_import_mode', importMode);
+    setLastImportMode(importMode);
+
+    onImport(scannedPasswords);
+    setSuccess('Contraseñas importadas exitosamente desde el QR');
+    setTimeout(() => {
+      void handleClose();
+    }, 1500);
+  };
+
+  const handleScanQRBack = () => {
+    setError('');
+    if (scanQRStep === 1) {
+      void changeMode('select');
+      return;
+    }
+    if (scanQRStep === 2) {
+      setScanQRStep(1);
+      setScanQRAnimKey((k) => k + 1);
+      return;
+    }
+    if (scanQRStep === 3) {
+      setScanQRStep(2);
+      setScanQRAnimKey((k) => k + 1);
+    }
+  };
+
+  const handleScanQRNext = async () => {
+    setError('');
+    const readySingle = !!pendingQRPayload;
+    const multi = !!activeTransferId && !!receivedChunks[activeTransferId];
+    const readyMulti =
+      multi &&
+      Object.keys(receivedChunks[activeTransferId].chunks).length ===
+        receivedChunks[activeTransferId].totalChunks;
+    const transferReady = readySingle || readyMulti;
+
+    if (scanQRStep === 1) {
+      if (!transferReady) {
+        const totalQRs = multi ? receivedChunks[activeTransferId!].totalChunks : 1;
+        const receivedQRs = multi
+          ? Object.keys(receivedChunks[activeTransferId!].chunks).length
+          : pendingQRPayload
+          ? 1
+          : 0;
+        setError(
+          `Faltan QRs por leer: tienes ${receivedQRs} de ${totalQRs}. Completa la lectura antes de avanzar.`
+        );
+        return;
+      }
+      setScanQRStep(2);
+      setScanQRAnimKey((k) => k + 1);
+      return;
+    }
+
+    if (scanQRStep === 2) {
+      if (!transferReady) {
+        setError('La transferencia no está completa. Vuelve al paso 1 y lee todos los QRs.');
+        return;
+      }
+      if (!qrImportPattern || qrImportPattern.length < 4) {
+        setError('Dibuja el patrón de desbloqueo antes de continuar.');
+        return;
+      }
+
+      const ok = await handleDecryptScannedQR();
+      if (!ok || scannedPasswords.length === 0) {
+        return;
+      }
+      setScanQRStep(3);
+      setScanQRAnimKey((k) => k + 1);
+      return;
+    }
+
+    if (scanQRStep === 3) {
+      await handleImportFromQR();
+    }
+  };
+
+  const handleVaultFileSelect = () => {
+    vaultFileInputRef.current?.click();
+  };
+
+  const handleImageFileSelect = () => {
+    imageFileInputRef.current?.click();
+  };
+
+  const handleStartCameraScan = async () => {
+    await stopQRScanner();
+    resetQRImportState();
+    if (imageFileInputRef.current) {
+      imageFileInputRef.current.value = '';
+    }
+    setSuccess('Abriendo cámara para escanear el QR...');
+    setError('');
+    setScanSource('camera');
+    setScannerRestartKey((current) => current + 1);
+  };
+
+  const handleRestartQRScan = async () => {
+    if (scanSource === 'camera') {
+      await handleStartCameraScan();
+      return;
+    }
+
+    await stopQRScanner();
+    resetQRImportState();
+    if (imageFileInputRef.current) {
+      imageFileInputRef.current.value = '';
+    }
+    setSuccess('');
+    setError('');
+  };
+
+  const handleImageSelection = async (file: File | null) => {
+    if (!file) return;
+
+    await stopQRScanner();
+    resetQRImportState();
+    setSelectedImageName(file.name);
+    setSuccess('Procesando imagen para leer el QR...');
+    setError('');
+
+    try {
+      const diagnostics: { html5: string[]; jsqr: string[] } = { html5: [], jsqr: [] };
+      ensureQrImageWorkerElement();
+      const decodedText = await decodeQrFromFileRobust(file, diagnostics);
+      if (diagnostics.html5.length || diagnostics.jsqr.length) {
+        console.debug('[handleImageSelection] Diagnósticos decodificación:', diagnostics);
+      }
+      await handleParsedQRPayload(decodedText, 'image');
+    } catch (error) {
+      console.error('[handleImageSelection] Falló decodificación QR desde imagen:', error);
+      try {
+        qrScannerRef.current?.clear();
+      } catch {
+        // Ignore cleanup errors after a failed scan
+      }
+      qrScannerRef.current = null;
+      const message = serializeUnknownError(error);
+      const userMessage = message.includes('Ningun decoder pudo leer')
+        ? message
+        : QR_IMAGE_ERROR_MESSAGE + ' (Detalles: ' + message + ')';
+      setError(userMessage);
+      setSuccess('');
+    }
+  };
+
+  const togglePasswordSelection = (id: string) => {
+    setSelectedPasswordIds((current) =>
+      current.includes(id)
+        ? current.filter((passwordId) => passwordId !== id)
+        : [...current, id]
+    );
+  };
+
+  useEffect(() => {
+    if (!isOpen || mode !== 'scanQR' || scanSource !== 'camera') {
+      return;
+    }
+
+    let cancelled = false;
+
+    const startScanner = async () => {
+      await stopQRScanner();
+      isScanLockedRef.current = false;
+
+      try {
+        const scanner = new Html5Qrcode(QR_READER_ELEMENT_ID);
+        qrScannerRef.current = scanner;
+
+        await scanner.start(
+          { facingMode: 'environment' },
+          {
+            fps: 10,
+            qrbox: { width: 220, height: 220 },
+            aspectRatio: 1
+          },
+          async (decodedText) => {
+            if (cancelled || isScanLockedRef.current) return;
+            isScanLockedRef.current = true;
+            await handleParsedQRPayload(decodedText, 'camera');
+          },
+          () => {}
+        );
+
+        isScannerRunningRef.current = true;
+        setSuccess('Apunta la cámara al QR para continuar con la importación.');
+      } catch {
+        qrScannerRef.current = null;
+        isScannerRunningRef.current = false;
+        setSuccess('');
+        setError('No se pudo abrir la cámara. Revisa los permisos o usa un navegador compatible.');
+      }
+    };
+
+    void startScanner();
+
+    return () => {
+      cancelled = true;
+      void stopQRScanner();
+    };
+  }, [handleParsedQRPayload, isOpen, mode, scanSource, scannerRestartKey, stopQRScanner]);
+
+  useEffect(() => {
+    if (!isOpen || mode !== 'scanQR') {
+      return;
+    }
+
+    const readySingle = !!pendingQRPayload;
+    const multi = !!activeTransferId && !!receivedChunks[activeTransferId];
+    const readyMulti =
+      multi &&
+      Object.keys(receivedChunks[activeTransferId].chunks).length ===
+        receivedChunks[activeTransferId].totalChunks;
+    const transferReady = readySingle || readyMulti;
+
+    if (scanQRStep === 1) {
+      if (!transferReady) return;
+      const autoAdvance = setTimeout(() => {
+        setScanQRStep(2);
+        setScanQRAnimKey((k) => k + 1);
+        setError('');
+      }, 650);
+      return () => clearTimeout(autoAdvance);
+    }
+
+    if (scanQRStep === 2) {
+      if (!transferReady) return;
+      if (!qrImportPattern || qrImportPattern.length < 4) return;
+      if (scannedPasswords.length > 0) return;
+
+      const guardKey =
+        JSON.stringify(qrImportPattern) +
+        '|' +
+        (pendingQRPayload?.version === '3.0'
+          ? `${(pendingQRPayload as QRSharePayloadV3).transferId}-${
+              (pendingQRPayload as QRSharePayloadV3).chunkIndex
+            }`
+          : String(pendingQRPayload?.timestamp || '')) +
+        '|' +
+        (multi
+          ? `${activeTransferId}-${
+              receivedChunks[activeTransferId!].totalChunks
+            }-${Object.keys(receivedChunks[activeTransferId!].chunks).length}`
+          : 'single') +
+        '|' +
+        scanQRAnimKey;
+
+      if (scanQRAutoDecryptGuardRef.current === guardKey) return;
+
+      const t = setTimeout(async () => {
+        if (scanQRAutoDecryptGuardRef.current === guardKey) return;
+        scanQRAutoDecryptGuardRef.current = guardKey;
+        const ok = await handleDecryptScannedQR();
+        if (ok) {
+          setScanQRStep(3);
+          setScanQRAnimKey((k) => k + 1);
+          setError('');
+        }
+      }, 480);
+
+      return () => clearTimeout(t);
+    }
+  }, [
+    activeTransferId,
+    handleDecryptScannedQR,
+    isOpen,
+    mode,
+    pendingQRPayload,
+    qrImportPattern,
+    receivedChunks,
+    scanQRAnimKey,
+    scanQRStep,
+    scannedPasswords.length
+  ]);
+
+  useEffect(() => {
+    if (!isOpen || mode !== 'shareQR') return;
+    if (shareQRStep !== 2) return;
+    if (!qrSharePattern || qrSharePattern.length < 4) return;
+    if (generatedQRChunks.length > 0) return;
+
+    const guardKey =
+      JSON.stringify(qrSharePattern) +
+      '|' +
+      selectedPasswordIds.slice().sort().join(',') +
+      '|' +
+      passwords.length +
+      '|' +
+      qrSharePatternReset;
+
+    if (shareQRAutoGenerateGuardRef.current === guardKey) return;
+
+    const t = setTimeout(async () => {
+      if (shareQRAutoGenerateGuardRef.current === guardKey) return;
+      shareQRAutoGenerateGuardRef.current = guardKey;
+      const ok = await handleGenerateQR();
+      if (ok) {
+        setShareQRStep(3);
+        setError('');
+      }
+    }, 480);
+
+    return () => clearTimeout(t);
+  }, [
+    generatedQRChunks.length,
+    handleGenerateQR,
+    isOpen,
+    mode,
+    passwords.length,
+    qrSharePattern,
+    qrSharePatternReset,
+    selectedPasswordIds,
+    shareQRStep
+  ]);
 
   if (!isOpen) return null;
 
+  const modalMaxWidth = mode === 'shareQR' || mode === 'scanQR' ? 'max-w-4xl' : 'max-w-md';
+
   return (
     <div className="fixed inset-0 bg-black bg-opacity-70 flex justify-center items-center z-50 p-6">
-      <div className="bg-gray-800 rounded-lg shadow-xl p-6 w-full max-w-md text-gray-200 animate-fade-in-up">
+      <div className={`bg-gray-800 rounded-lg shadow-xl p-6 w-full ${modalMaxWidth} text-gray-200 animate-fade-in-up max-h-[90vh] overflow-y-auto`}>
         <h2 className="text-2xl font-bold mb-6 flex items-center">
           <ImportExportIcon className="w-6 h-6 mr-2 text-cyan-400" />
-          {mode === 'select' && 'Importar/Exportar'}
-          {mode === 'export' && 'Exportar Bóveda'}
-          {mode === 'import' && 'Importar Bóveda'}
+          {mode === 'select' && 'Gestionar bóveda'}
+          {mode === 'export' && 'Crear respaldo'}
+          {mode === 'import' && 'Restaurar respaldo'}
+          {mode === 'shareQR' && 'Enviar por QR'}
+          {mode === 'scanQR' && 'Recibir por QR'}
         </h2>
 
         {mode === 'select' && (
-          <div className="space-y-4">
-            <p className="text-gray-400 mb-4">
-              ¿Qué deseas hacer con tu bóveda de contraseñas?
+          <div className="space-y-6">
+            <p className="text-gray-400">
+              Crea o restaura un respaldo, o transfiere contraseñas entre dispositivos.
             </p>
+
+            <div className="space-y-3">
+              <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">
+                Respaldos
+              </p>
+              <div className="space-y-2">
+                <button
+                  onClick={() => void changeMode('export')}
+                  className="w-full px-4 py-3 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold"
+                >
+                  Crear respaldo
+                </button>
+                <button
+                  onClick={() => void changeMode('import')}
+                  className="w-full px-4 py-3 rounded-md bg-gray-700 hover:bg-gray-600 transition-colors font-semibold border border-gray-600"
+                >
+                  Restaurar respaldo
+                </button>
+              </div>
+            </div>
+
+            <div className="relative flex items-center py-1">
+              <div className="flex-grow border-t border-gray-700" />
+              <span className="flex-shrink mx-4 text-xs uppercase tracking-wider text-gray-500 font-semibold">
+                Transferencia QR
+              </span>
+              <div className="flex-grow border-t border-gray-700" />
+            </div>
+
+            <div className="space-y-3">
+              <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">
+                Transferencia entre dispositivos
+              </p>
+              <div className="space-y-2">
+                <button
+                  onClick={() => void changeMode('shareQR')}
+                  className="w-full px-4 py-3 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold"
+                >
+                  Enviar por QR
+                </button>
+                <button
+                  onClick={() => void changeMode('scanQR')}
+                  className="w-full px-4 py-3 rounded-md bg-gray-700 hover:bg-gray-600 transition-colors font-semibold border border-gray-600"
+                >
+                  Recibir por QR
+                </button>
+              </div>
+            </div>
+
             <button
-              onClick={() => setMode('export')}
-              className="w-full px-4 py-3 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold"
-            >
-              Exportar (Crear backup)
-            </button>
-            <button
-              onClick={() => setMode('import')}
-              className="w-full px-4 py-3 rounded-md bg-gray-600 hover:bg-gray-500 transition-colors font-semibold"
-            >
-              Importar (Restaurar backup)
-            </button>
-            <button
-              onClick={handleClose}
-              className="w-full px-4 py-2 rounded-md bg-gray-700 hover:bg-gray-600 transition-colors"
+              onClick={() => void handleClose()}
+              className="w-full px-4 py-2 rounded-md bg-gray-700 hover:bg-gray-600 transition-colors mt-2"
             >
               Cancelar
             </button>
@@ -188,47 +1431,88 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
 
         {mode === 'export' && (
           <div className="space-y-4">
-            <p className="text-gray-400 mb-4">
-              Se creará un archivo encriptado con todas tus contraseñas.
+            <p className="text-gray-400">
+              Crea una copia encriptada de toda tu bóveda. Tendrás que confirmar el mismo patrón dos veces.
             </p>
-            <div>
-              <label className="block text-sm font-medium text-gray-400 mb-1">
-                Contraseña para proteger el archivo
-              </label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full p-3 bg-gray-700 rounded-md border border-gray-600 focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 outline-none transition"
-                placeholder="Elige una contraseña segura"
-              />
+
+            <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-baseline gap-2">
+                  <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-cyan-500/10 text-cyan-400 text-xs font-bold border border-cyan-500/30">
+                    {backupConfirmStep ? 2 : 1}
+                  </span>
+                  <p className="text-sm font-semibold text-gray-200">
+                    {backupConfirmStep ? 'Confirma el patrón' : 'Dibuja un patrón de protección'}
+                  </p>
+                </div>
+                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  Paso {backupConfirmStep ? 2 : 1} de 2
+                </span>
+              </div>
+              <div className="h-1.5 w-full bg-gray-700 rounded-full overflow-hidden">
+                <div
+                  className={`h-full transition-all duration-300 ${backupConfirmStep ? 'bg-cyan-500 w-full' : 'bg-cyan-500/70 w-1/2'}`}
+                />
+              </div>
+              <p className="text-xs text-gray-500">
+                {backupConfirmStep
+                  ? 'Dibuja exactamente el mismo patrón para confirmar.'
+                  : 'Conecta al menos 4 puntos. Deberás recordarlo para restaurar este respaldo.'}
+              </p>
+              <div className="flex justify-center">
+                <GesturePad
+                  onPatternComplete={handleExportBackupPattern}
+                  minPoints={4}
+                  showError={!!patternError}
+                  resetKey={backupPatternReset}
+                />
+              </div>
+              <div className="flex flex-wrap gap-2 justify-center items-center min-h-[20px]">
+                {backupPattern && !backupConfirmStep && (
+                  <p className="text-xs text-green-400">✓ Patrón definido. Confírmalo dibujándolo de nuevo.</p>
+                )}
+                {backupConfirmStep && !backupConfirmPattern && (
+                  <p className="text-xs text-cyan-400">Ya casi terminas: dibuja el mismo patrón una segunda vez.</p>
+                )}
+                {patternError && (
+                  <p className="text-xs text-red-400">{patternError}</p>
+                )}
+              </div>
+              {(backupPattern || backupConfirmPattern) && (
+                <div className="flex justify-center pt-1">
+                  <button
+                    onClick={() => {
+                      setBackupPattern(null);
+                      setBackupConfirmPattern(null);
+                      setBackupConfirmStep(false);
+                      setBackupPatternReset((k) => k + 1);
+                      setPatternError('');
+                      setSuccess('');
+                    }}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-gray-700/60 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-600/40"
+                  >
+                    ↺ Reiniciar patrones
+                  </button>
+                </div>
+              )}
             </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-400 mb-1">
-                Confirmar contraseña
-              </label>
-              <input
-                type="password"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                className="w-full p-3 bg-gray-700 rounded-md border border-gray-600 focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 outline-none transition"
-                placeholder="Repite la contraseña"
-              />
-            </div>
-            {error && <p className="text-red-400 text-sm">{error}</p>}
-            {success && <p className="text-green-400 text-sm">{success}</p>}
-            <div className="flex space-x-3">
+
+            {error && <p className="text-red-400 text-sm pl-1">{error}</p>}
+            {success && <p className="text-green-400 text-sm pl-1">{success}</p>}
+
+            <div className="flex justify-between gap-3 pt-2">
               <button
-                onClick={() => setMode('select')}
-                className="flex-1 px-4 py-2 rounded-md bg-gray-600 hover:bg-gray-500 transition-colors"
+                onClick={() => void changeMode('select')}
+                className="px-4 py-2 rounded-md bg-gray-600 hover:bg-gray-500 transition-colors min-w-[120px]"
               >
                 Atrás
               </button>
               <button
-                onClick={handleExport}
-                className="flex-1 px-4 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold"
+                onClick={() => void handleExport()}
+                disabled={!backupPattern || !backupConfirmPattern}
+                className="px-5 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold disabled:opacity-50 disabled:cursor-not-allowed min-w-[160px]"
               >
-                Exportar
+                Crear respaldo
               </button>
             </div>
           </div>
@@ -236,81 +1520,1007 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
 
         {mode === 'import' && (
           <div className="space-y-4">
-            <p className="text-gray-400 mb-4">
-              Selecciona un archivo de backup para importar.
+            <p className="text-gray-400">
+              Restaura una copia de seguridad desde un archivo <code className="px-1 rounded bg-gray-700/60 text-cyan-300 text-xs">.vault</code>.
             </p>
-            <div>
-              <label className="block text-sm font-medium text-gray-400 mb-1">
-                Archivo de backup (.vault)
-              </label>
-              <button
-                onClick={handleFileSelect}
-                className="w-full p-3 bg-gray-700 rounded-md border border-gray-600 hover:bg-gray-600 transition-colors text-left"
-              >
-                {fileInputRef.current?.files?.[0]?.name || 'Seleccionar archivo...'}
-              </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".vault"
-                onChange={() => {}}
-                className="hidden"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-400 mb-1">
-                Contraseña del archivo
-              </label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full p-3 bg-gray-700 rounded-md border border-gray-600 focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 outline-none transition"
-                placeholder="Ingresa la contraseña del backup"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-400 mb-1">
-                Modo de importación
-              </label>
-              <div className="space-y-2">
-                <label className="flex items-center">
-                  <input
-                    type="radio"
-                    value="merge"
-                    checked={importMode === 'merge'}
-                    onChange={(e) => setImportMode(e.target.value as 'merge' | 'overwrite')}
-                    className="mr-2"
+
+            <div className="space-y-3">
+              <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4">
+                <div className="flex items-baseline gap-2 mb-2">
+                  <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-cyan-500/10 text-cyan-400 text-xs font-bold border border-cyan-500/30">
+                    1
+                  </span>
+                  <label className="text-sm font-semibold text-gray-200">
+                    Archivo de respaldo
+                  </label>
+                </div>
+                <button
+                  onClick={handleVaultFileSelect}
+                  className="w-full p-3 bg-gray-700 rounded-md border border-gray-600 hover:bg-gray-600 transition-colors text-left"
+                >
+                  {selectedFileName || 'Seleccionar archivo .vault...'}
+                </button>
+                <input
+                  ref={vaultFileInputRef}
+                  type="file"
+                  accept=".vault"
+                  onChange={(e) => setSelectedFileName(e.target.files?.[0]?.name || '')}
+                  className="hidden"
+                />
+                {selectedFileName && (
+                  <p className="mt-2 text-xs text-green-400">✓ Archivo cargado: {selectedFileName}</p>
+                )}
+              </div>
+
+              <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4">
+                <div className="flex items-baseline gap-2 mb-2">
+                  <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-cyan-500/10 text-cyan-400 text-xs font-bold border border-cyan-500/30">
+                    2
+                  </span>
+                  <label className="text-sm font-semibold text-gray-200">
+                    Modo de restauración
+                  </label>
+                </div>
+                <div className="space-y-2">
+                  <label className={`flex items-start gap-3 p-3 rounded-md border transition-colors cursor-pointer ${
+                    importMode === 'merge' ? 'border-cyan-500/60 bg-cyan-500/5' : 'border-gray-600 bg-gray-800/40 hover:border-gray-500'
+                  }`}>
+                    <input
+                      type="radio"
+                      value="merge"
+                      checked={importMode === 'merge'}
+                      onChange={(e) => setImportMode(e.target.value as ImportMode)}
+                      className="mt-1 mr-1"
+                    />
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-gray-200">Agregar a las existentes</p>
+                      <p className="text-xs text-gray-500 mt-0.5">Fusiona las contraseñas nuevas con las que ya tienes. Se actualizarán aquellas con el mismo sitio y usuario.</p>
+                    </div>
+                  </label>
+                  <label className={`flex items-start gap-3 p-3 rounded-md border transition-colors cursor-pointer ${
+                    importMode === 'overwrite' ? 'border-cyan-500/60 bg-cyan-500/5' : 'border-gray-600 bg-gray-800/40 hover:border-gray-500'
+                  }`}>
+                    <input
+                      type="radio"
+                      value="overwrite"
+                      checked={importMode === 'overwrite'}
+                      onChange={(e) => setImportMode(e.target.value as ImportMode)}
+                      className="mt-1 mr-1"
+                    />
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-gray-200">Reemplazar todas</p>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        Elimina las contraseñas actuales y deja solo las del archivo. Esta acción no se puede deshacer.
+                      </p>
+                    </div>
+                  </label>
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4 space-y-3">
+                <div className="flex items-baseline gap-2">
+                  <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-cyan-500/10 text-cyan-400 text-xs font-bold border border-cyan-500/30">
+                    3
+                  </span>
+                  <p className="text-sm font-semibold text-gray-200">
+                    Patrón de desbloqueo del respaldo
+                  </p>
+                </div>
+                <p className="text-xs text-gray-500">
+                  Dibuja el patrón con el que se protegió este archivo cuando se creó.
+                </p>
+                <div className="flex justify-center">
+                  <GesturePad
+                    onPatternComplete={(p) => {
+                      setImportPattern(p);
+                      if (!selectedFileName) {
+                        setSuccess('Patrón listo. Selecciona el archivo de respaldo para restaurar.');
+                      }
+                    }}
+                    minPoints={4}
+                    resetKey={importPatternReset}
                   />
-                  <span>Agregar a las existentes (Merge)</span>
-                </label>
-                <label className="flex items-center">
-                  <input
-                    type="radio"
-                    value="overwrite"
-                    checked={importMode === 'overwrite'}
-                    onChange={(e) => setImportMode(e.target.value as 'merge' | 'overwrite')}
-                    className="mr-2"
-                  />
-                  <span>Reemplazar todas (Overwrite)</span>
-                </label>
+                </div>
+                {importPattern && (
+                  <p className="text-center text-xs text-green-400">✓ Patrón introducido.</p>
+                )}
+                {importPattern && (
+                  <div className="flex justify-center pt-1">
+                    <button
+                      onClick={() => {
+                        setImportPattern(null);
+                        setImportPatternReset((k) => k + 1);
+                        setSuccess('');
+                      }}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-gray-700/60 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-600/40"
+                    >
+                      ↺ Reiniciar patrón
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
-            {error && <p className="text-red-400 text-sm">{error}</p>}
-            {success && <p className="text-green-400 text-sm">{success}</p>}
-            <div className="flex space-x-3">
+
+            {error && <p className="text-red-400 text-sm pl-1">{error}</p>}
+            {success && <p className="text-green-400 text-sm pl-1">{success}</p>}
+
+            <div className="flex justify-between gap-3 pt-2">
               <button
-                onClick={() => setMode('select')}
-                className="flex-1 px-4 py-2 rounded-md bg-gray-600 hover:bg-gray-500 transition-colors"
+                onClick={() => void changeMode('select')}
+                className="px-4 py-2 rounded-md bg-gray-600 hover:bg-gray-500 transition-colors min-w-[120px]"
               >
                 Atrás
               </button>
               <button
-                onClick={handleImport}
-                className="flex-1 px-4 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold"
+                onClick={() => void handleImport()}
+                disabled={!selectedFileName || !importPattern}
+                className="px-5 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold disabled:opacity-50 disabled:cursor-not-allowed min-w-[180px]"
               >
-                Importar
+                Restaurar respaldo
               </button>
+            </div>
+          </div>
+        )}
+
+        {mode === 'shareQR' && (
+          <div className="space-y-5">
+            <div className="space-y-1">
+              <p className="text-gray-400 text-sm">
+                Transfiere contraseñas cifradas a otro dispositivo siguiendo este flujo guiado.
+              </p>
+            </div>
+
+            <div className="pt-1 pb-2">
+              <div className="max-w-[420px] mx-auto">
+                <div className="flex items-start justify-between px-1">
+                  <div className="flex flex-col items-center gap-2 flex-1">
+                    <div
+                      className={`relative z-10 w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold border-2 transition-colors ${
+                        shareQRStep > 1
+                          ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
+                          : shareQRStep === 1
+                          ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
+                          : 'bg-gray-800 border-gray-600 text-gray-500'
+                      }`}
+                    >
+                      {shareQRStep > 1 ? '✓' : '1'}
+                    </div>
+                    <div className="text-center space-y-0.5">
+                      <p
+                        className={`text-[11px] font-semibold leading-tight ${
+                          shareQRStep >= 1 ? 'text-gray-200' : 'text-gray-500'
+                        }`}
+                      >
+                        Seleccionar
+                      </p>
+                      {shareQRStep > 1 && (
+                        <p className="text-[10px] text-cyan-400/90 leading-none">Completado</p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex-1 flex items-center pt-4 mx-1">
+                    <div
+                      className={`h-0.5 w-full rounded-full transition-colors ${
+                        shareQRStep > 1 ? 'bg-cyan-500' : 'bg-gray-700'
+                      }`}
+                    />
+                  </div>
+
+                  <div className="flex flex-col items-center gap-2 flex-1">
+                    <div
+                      className={`relative z-10 w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold border-2 transition-colors ${
+                        shareQRStep > 2
+                          ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
+                          : shareQRStep === 2
+                          ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
+                          : 'bg-gray-800 border-gray-600 text-gray-500'
+                      }`}
+                    >
+                      {shareQRStep > 2 ? '✓' : '2'}
+                    </div>
+                    <div className="text-center space-y-0.5">
+                      <p
+                        className={`text-[11px] font-semibold leading-tight ${
+                          shareQRStep >= 2 ? 'text-gray-200' : 'text-gray-500'
+                        }`}
+                      >
+                        Patrón
+                      </p>
+                      {shareQRStep === 2 && (
+                        <p className="text-[10px] text-cyan-400/90 leading-none">Activo</p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex-1 flex items-center pt-4 mx-1">
+                    <div
+                      className={`h-0.5 w-full rounded-full transition-colors ${
+                        shareQRStep > 2 ? 'bg-cyan-500' : 'bg-gray-700'
+                      }`}
+                    />
+                  </div>
+
+                  <div className="flex flex-col items-center gap-2 flex-1">
+                    <div
+                      className={`relative z-10 w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold border-2 transition-colors ${
+                        shareQRStep >= 3
+                          ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
+                          : 'bg-gray-800 border-gray-600 text-gray-500'
+                      }`}
+                    >
+                      3
+                    </div>
+                    <div className="text-center space-y-0.5">
+                      <p
+                        className={`text-[11px] font-semibold leading-tight ${
+                          shareQRStep >= 3 ? 'text-gray-200' : 'text-gray-500'
+                        }`}
+                      >
+                        QR
+                      </p>
+                      {shareQRStep === 3 && (
+                        <p className="text-[10px] text-cyan-400/90 leading-none">Activo</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div
+              key={shareQRAnimKey}
+              className="animate-in fade-in zoom-in-[99%] duration-200 ease-out"
+            >
+              {shareQRStep === 1 && (
+                <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4">
+                  <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                    <div>
+                      <p className="text-sm font-semibold text-gray-200">
+                        Paso 1 — Selecciona las contraseñas
+                      </p>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        Elige qué entradas quieres transferir al otro dispositivo.
+                      </p>
+                    </div>
+                    <div className="flex flex-col items-end gap-1">
+                      <span className="text-xs font-semibold text-gray-500 px-2 py-0.5 rounded-md bg-gray-800/70 border border-gray-700/60">
+                        {selectedPasswordIds.length} / {passwords.length}
+                      </span>
+                      {(() => {
+                        if (selectedPasswordIds.length === 0) return null;
+                        const selected = passwords.filter((p) => selectedPasswordIds.includes(p.id));
+                        const rough = roughEstimateQRChunks(sanitizePasswordsForQR(selected));
+                        const exact = qrSharePattern
+                          ? estimateQRChunksNeeded(
+                              { passwords: sanitizePasswordsForQR(selected) },
+                              patternToString(qrSharePattern)
+                            )
+                          : null;
+                        const count = exact ?? rough;
+                        return (
+                          <span className="text-xs font-semibold px-2 py-0.5 rounded-md bg-cyan-500/15 border border-cyan-500/30 text-cyan-300">
+                            ~{count} QR{count > 1 ? 's' : ''} necesario{count > 1 ? 's' : ''}
+                          </span>
+                        );
+                      })()}
+                    </div>
+                  </div>
+
+                  {passwords.length === 0 ? (
+                    <div className="p-4 rounded-md border border-gray-700 bg-gray-800/60 text-gray-400 text-center">
+                      No hay contraseñas disponibles para enviar.
+                    </div>
+                  ) : (
+                    <div className="max-h-[360px] overflow-y-auto space-y-2 pr-1">
+                      {passwords.map((entry) => {
+                        const isSelected = selectedPasswordIds.includes(entry.id);
+                        return (
+                          <button
+                            key={entry.id}
+                            type="button"
+                            onClick={() => togglePasswordSelection(entry.id)}
+                            className={`w-full text-left p-3 rounded-md border transition-colors ${
+                              isSelected
+                                ? 'border-cyan-500/60 bg-cyan-500/10'
+                                : 'border-gray-700 bg-gray-800/50 hover:bg-gray-700/40'
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="font-semibold text-cyan-400 truncate">{entry.site}</p>
+                                <p className="text-sm text-gray-300 truncate">{entry.username}</p>
+                                <p className="text-xs text-gray-500 mt-1 truncate">{entry.category}</p>
+                              </div>
+                              <div className={`mt-0.5 h-5 w-5 flex-shrink-0 rounded border flex items-center justify-center ${
+                                isSelected ? 'border-cyan-400 bg-cyan-500/25' : 'border-gray-500'
+                              }`}>
+                                {isSelected && <span className="text-cyan-200 text-xs font-bold">✓</span>}
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {passwords.length > 0 && (
+                    <div className="flex items-center justify-between pt-3 mt-3 border-t border-gray-700/60">
+                      <button
+                        onClick={() => setSelectedPasswordIds(passwords.map(p => p.id))}
+                        className="text-xs text-cyan-400 hover:text-cyan-300 transition-colors"
+                      >
+                        Seleccionar todas
+                      </button>
+                      <button
+                        onClick={() => setSelectedPasswordIds([])}
+                        disabled={selectedPasswordIds.length === 0}
+                        className="text-xs text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        Limpiar selección
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {shareQRStep === 2 && (
+                <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4 space-y-3">
+                  <div>
+                    <p className="text-sm font-semibold text-gray-200">
+                      Paso 2 — Patrón de desbloqueo de este dispositivo
+                    </p>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      Dibuja el patrón que usas para abrir SecurePass aquí. Servirá para cifrar el contenido del QR.
+                    </p>
+                  </div>
+                  <div className="flex justify-center pt-2">
+                    <GesturePad
+                      onPatternComplete={(p) => {
+                        setQrSharePattern(p);
+                        setError('');
+                      }}
+                      minPoints={4}
+                      resetKey={qrSharePatternReset}
+                    />
+                  </div>
+                  <div className="flex flex-col items-center gap-1 min-h-[44px]">
+                    {qrSharePattern && (
+                      <p className="text-xs text-green-400">✓ Patrón listo para cifrar.</p>
+                    )}
+                    {qrSharePattern && (
+                      <button
+                        onClick={() => {
+                          setQrSharePattern(null);
+                          setQrSharePatternReset((k) => k + 1);
+                          setGeneratedQRData('');
+                        }}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-gray-700/60 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-600/40"
+                      >
+                        ↺ Reiniciar patrón
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {shareQRStep === 3 && (
+                <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4 space-y-4">
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                    <div>
+                      <p className="text-sm font-semibold text-gray-200">
+                        Paso 3 — Transferencia en curso
+                      </p>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        {generatedQRChunks.length > 1
+                          ? 'Muestra todos los códigos QR al otro dispositivo. Puedes navegar con las flechas.'
+                          : 'Muéstraselo al otro dispositivo o guárdalo como imagen.'}
+                      </p>
+                    </div>
+                    {generatedQRChunks.length > 1 && (
+                      <div className="flex flex-col items-end gap-1">
+                        <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-cyan-500/15 border border-cyan-500/30 text-cyan-300">
+                          QR {currentQRChunkIndex + 1} / {generatedQRChunks.length}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {generatedQRChunks.length > 1 && (
+                    <div className="h-1.5 w-full bg-gray-800 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-cyan-500 to-cyan-400 transition-[width] duration-200"
+                        style={{
+                          width: `${((currentQRChunkIndex + 1) / generatedQRChunks.length) * 100}%`
+                        }}
+                      />
+                    </div>
+                  )}
+
+                  <div className="flex flex-col items-center justify-center text-center py-1">
+                    {generatedQRData ? (
+                      <div className="flex flex-col items-center gap-3">
+                        <div className="bg-white p-3 rounded-lg shadow-lg">
+                          <div ref={qrCodeContainerRef}>
+                            <QRCode value={generatedQRData} size={260} level="Q" />
+                          </div>
+                        </div>
+                        <div className="flex flex-col items-center gap-2">
+                          <button
+                            onClick={() => void handleSaveQRImage()}
+                            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-gray-700 hover:bg-gray-600 transition-colors text-sm border border-gray-600"
+                          >
+                            💾 Guardar como imagen PNG
+                          </button>
+                          <p className="text-xs text-gray-500 max-w-[320px]">
+                            El otro dispositivo necesitará el patrón de desbloqueo de este dispositivo para descifrarlo.
+                          </p>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center gap-2 text-gray-500 px-2">
+                        <div className="w-20 h-20 rounded-lg border-2 border-dashed border-gray-600 flex items-center justify-center text-3xl opacity-50">
+                          ⬚
+                        </div>
+                        <p className="text-sm">
+                          Generando QR cifrado…
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  {generatedQRChunks.length > 1 && (
+                    <div className="flex items-center justify-between gap-3 pt-2 border-t border-gray-700/60">
+                      <button
+                        onClick={() => {
+                          setCurrentQRChunkIndex((prev) => {
+                            const next = Math.max(0, prev - 1);
+                            setGeneratedQRData(generatedQRChunks[next] || '');
+                            return next;
+                          });
+                        }}
+                        disabled={currentQRChunkIndex === 0}
+                        className="inline-flex items-center gap-1 px-3 py-2 rounded-md bg-gray-700/70 hover:bg-gray-700 text-sm text-gray-200 border border-gray-600/50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                      >
+                        ← Anterior
+                      </button>
+                      <p className="text-xs text-gray-500 font-medium">
+                        Puede escanearse en cualquier orden
+                      </p>
+                      <button
+                        onClick={() => {
+                          setCurrentQRChunkIndex((prev) => {
+                            const next = Math.min(generatedQRChunks.length - 1, prev + 1);
+                            setGeneratedQRData(generatedQRChunks[next] || '');
+                            return next;
+                          });
+                        }}
+                        disabled={currentQRChunkIndex >= generatedQRChunks.length - 1}
+                        className="inline-flex items-center gap-1 px-3 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 text-sm text-white font-semibold disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                      >
+                        Siguiente →
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {error && <p className="text-red-400 text-sm pl-1">{error}</p>}
+            {success && <p className="text-green-400 text-sm pl-1">{success}</p>}
+
+            <div className="flex justify-between gap-3 pt-2">
+              <button
+                onClick={async () => {
+                  setError('');
+                  if (shareQRStep === 1) {
+                    await changeMode('select');
+                    return;
+                  }
+                  const next = (shareQRStep - 1) as 1 | 2 | 3;
+                  setShareQRStep(next);
+                  setShareQRAnimKey((k) => k + 1);
+                  if (next === 2) {
+                    setGeneratedQRData('');
+                    setGeneratedQRChunks([]);
+                    setCurrentQRChunkIndex(0);
+                  }
+                }}
+                className="px-4 py-2 rounded-md bg-gray-600 hover:bg-gray-500 transition-colors min-w-[120px]"
+              >
+                Atrás
+              </button>
+
+              {shareQRStep < 3 ? (
+                <button
+                  onClick={async () => {
+                    setError('');
+                    if (shareQRStep === 1) {
+                      if (selectedPasswordIds.length === 0) {
+                        setError('Selecciona al menos una contraseña para continuar.');
+                        return;
+                      }
+                      setShareQRStep(2);
+                      setShareQRAnimKey((k) => k + 1);
+                      return;
+                    }
+                    if (shareQRStep === 2) {
+                      if (!qrSharePattern) {
+                        setError('Dibuja tu patrón de desbloqueo para continuar.');
+                        return;
+                      }
+                      const ok = handleGenerateQR();
+                      if (ok) {
+                        setShareQRStep(3);
+                        setShareQRAnimKey((k) => k + 1);
+                      }
+                    }
+                  }}
+                  disabled={
+                    (shareQRStep === 1 && selectedPasswordIds.length === 0) ||
+                    (shareQRStep === 2 && !qrSharePattern)
+                  }
+                  className="px-5 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold disabled:opacity-50 disabled:cursor-not-allowed min-w-[160px]"
+                >
+                  Continuar
+                </button>
+              ) : (
+                <button
+                  onClick={() => void handleClose()}
+                  className="px-5 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold min-w-[160px]"
+                >
+                  Finalizar
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {mode === 'scanQR' && (
+          <div className="space-y-4">
+            <p className="text-gray-400 text-sm">
+              Recibe contraseñas desde otro dispositivo usando la cámara o una imagen QR. Si la transferencia usa varios códigos, escanéalos todos.
+            </p>
+
+            <div className="max-w-[420px] mx-auto">
+              <div className="flex items-start justify-between px-1">
+                <div className="flex flex-col items-center gap-2 flex-1">
+                  <div
+                    className={`relative z-10 w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold border-2 transition-colors ${
+                      scanQRStep > 1
+                        ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
+                        : scanQRStep === 1
+                        ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
+                        : 'bg-gray-800 border-gray-600 text-gray-500'
+                    }`}
+                  >
+                    {scanQRStep > 1 ? '✓' : '1'}
+                  </div>
+                  <div className="text-center space-y-0.5">
+                    <p
+                      className={`text-[11px] font-semibold leading-tight ${
+                        scanQRStep >= 1 ? 'text-gray-200' : 'text-gray-500'
+                      }`}
+                    >
+                      Escanear
+                    </p>
+                    {scanQRStep > 1 && (
+                      <p className="text-[10px] text-cyan-400/90 leading-none">Completado</p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex-1 flex items-center pt-4 mx-1">
+                  <div
+                    className={`h-0.5 w-full rounded-full transition-colors ${
+                      scanQRStep > 1 ? 'bg-cyan-500' : 'bg-gray-700'
+                    }`}
+                  />
+                </div>
+
+                <div className="flex flex-col items-center gap-2 flex-1">
+                  <div
+                    className={`relative z-10 w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold border-2 transition-colors ${
+                      scanQRStep > 2
+                        ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
+                        : scanQRStep === 2
+                        ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
+                        : 'bg-gray-800 border-gray-600 text-gray-500'
+                    }`}
+                  >
+                    {scanQRStep > 2 ? '✓' : '2'}
+                  </div>
+                  <div className="text-center space-y-0.5">
+                    <p
+                      className={`text-[11px] font-semibold leading-tight ${
+                        scanQRStep >= 2 ? 'text-gray-200' : 'text-gray-500'
+                      }`}
+                    >
+                      Patrón
+                    </p>
+                    {scanQRStep === 2 && (
+                      <p className="text-[10px] text-cyan-400/90 leading-none">Activo</p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex-1 flex items-center pt-4 mx-1">
+                  <div
+                    className={`h-0.5 w-full rounded-full transition-colors ${
+                      scanQRStep > 2 ? 'bg-cyan-500' : 'bg-gray-700'
+                    }`}
+                  />
+                </div>
+
+                <div className="flex flex-col items-center gap-2 flex-1">
+                  <div
+                    className={`relative z-10 w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold border-2 transition-colors ${
+                      scanQRStep >= 3
+                        ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
+                        : 'bg-gray-800 border-gray-600 text-gray-500'
+                    }`}
+                  >
+                    3
+                  </div>
+                  <div className="text-center space-y-0.5">
+                    <p
+                      className={`text-[11px] font-semibold leading-tight ${
+                        scanQRStep >= 3 ? 'text-gray-200' : 'text-gray-500'
+                      }`}
+                    >
+                      Confirmar
+                    </p>
+                    {scanQRStep === 3 && (
+                      <p className="text-[10px] text-cyan-400/90 leading-none">Activo</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div
+              key={scanQRAnimKey}
+              className="animate-in fade-in zoom-in-[99%] duration-200 ease-out"
+            >
+              {(() => {
+                const readySingle = !!pendingQRPayload;
+                const multi = !!activeTransferId && !!receivedChunks[activeTransferId];
+                const readyMulti =
+                  multi &&
+                  Object.keys(receivedChunks[activeTransferId].chunks).length ===
+                    receivedChunks[activeTransferId].totalChunks;
+                const transferReady = readySingle || readyMulti;
+
+                if (scanQRStep === 1) {
+                  const partialMulti =
+                    multi &&
+                    Object.keys(receivedChunks[activeTransferId].chunks).length <
+                      receivedChunks[activeTransferId].totalChunks;
+                  const loadedAny = readySingle || multi;
+                  const imageBtnLabel = partialMulti
+                    ? 'Cargar siguiente imagen QR'
+                    : readySingle
+                    ? 'Cargar otra imagen QR'
+                    : 'Cargar imagen QR';
+
+                  return (
+                    <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4 space-y-4">
+                      <div className="flex items-center justify-between flex-wrap gap-2">
+                        <div>
+                          <p className="text-sm font-semibold text-gray-200">
+                            Paso 1 — Obtén los QR
+                          </p>
+                          <p className="text-xs text-gray-500 mt-0.5">
+                            Usa la cámara del dispositivo o carga una imagen PNG/JPG.
+                          </p>
+                        </div>
+                        {multi && (
+                          <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-cyan-500/15 border border-cyan-500/30 text-cyan-300">
+                            {Object.keys(receivedChunks[activeTransferId].chunks).length} /{' '}
+                            {receivedChunks[activeTransferId].totalChunks}
+                          </span>
+                        )}
+                      </div>
+
+                      {multi && (
+                        <div className="space-y-2">
+                          <div className="h-1.5 w-full bg-gray-800 rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-gradient-to-r from-cyan-500 to-cyan-400 transition-[width] duration-200"
+                              style={{
+                                width: `${(Object.keys(
+                                  receivedChunks[activeTransferId].chunks
+                                ).length /
+                                  receivedChunks[activeTransferId].totalChunks) *
+                                  100}%`
+                              }}
+                            />
+                          </div>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {Array.from(
+                              { length: receivedChunks[activeTransferId].totalChunks },
+                              (_, i) => i + 1
+                            ).map((chunkIndex) => {
+                              const done = !!receivedChunks[activeTransferId].chunks[chunkIndex];
+                              return (
+                                <div
+                                  key={chunkIndex}
+                                  className={`w-6 h-6 rounded-md flex items-center justify-center text-[10px] font-bold border transition-colors ${
+                                    done
+                                      ? 'bg-cyan-500/30 border-cyan-500/60 text-cyan-200'
+                                      : 'bg-gray-800 border-gray-600 text-gray-500'
+                                  }`}
+                                >
+                                  {done ? '✓' : chunkIndex}
+                                </div>
+                              );
+                            })}
+                          </div>
+                          <p className="text-[11px] text-gray-500 pl-0.5">
+                            Transferencia #{activeTransferId}
+                          </p>
+                        </div>
+                      )}
+
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <button
+                          onClick={() => void handleStartCameraScan()}
+                          className="w-full px-4 py-2.5 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold text-sm"
+                        >
+                          Usar cámara
+                        </button>
+                        <button
+                          onClick={handleImageFileSelect}
+                          className="w-full px-4 py-2.5 rounded-md bg-gray-600 hover:bg-gray-500 transition-colors font-semibold text-sm"
+                        >
+                          {imageBtnLabel}
+                        </button>
+                      </div>
+
+                      <input
+                        ref={imageFileInputRef}
+                        type="file"
+                        accept=".png,.jpg,.jpeg,image/png,image/jpeg"
+                        onChange={(e) => void handleImageSelection(e.target.files?.[0] || null)}
+                        className="hidden"
+                      />
+
+                      {scanSource === 'camera' && !pendingQRPayload && (
+                        <div className="rounded-lg border border-gray-700 overflow-hidden">
+                          <div
+                            id={QR_READER_ELEMENT_ID}
+                            className="w-full min-h-[260px] rounded-lg overflow-hidden bg-black"
+                          />
+                        </div>
+                      )}
+
+                      {transferReady ? (
+                        multi && receivedChunks[activeTransferId].totalChunks > 1 ? (
+                          <div className="flex items-start gap-3 text-sm rounded-md border border-green-500/20 bg-green-500/5 px-4 py-3">
+                            <div className="text-green-400 text-xl leading-none mt-0.5">✓</div>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-gray-100 font-medium">Transferencia completa</p>
+                              <p className="text-gray-500 truncate mt-0.5">
+                                {Object.keys(receivedChunks[activeTransferId].chunks).length} QR de{' '}
+                                {receivedChunks[activeTransferId].totalChunks} listos para descifrar.
+                              </p>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="flex items-start gap-3 text-sm rounded-md border border-green-500/20 bg-green-500/5 px-4 py-3">
+                            <div className="text-green-400 text-xl leading-none mt-0.5">✓</div>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-gray-100 font-medium">QR leído correctamente</p>
+                              {selectedImageName && (
+                                <p className="text-gray-500 truncate mt-0.5">{selectedImageName}</p>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      ) : scanSource === 'image' ? (
+                        <p className="text-sm text-gray-500 text-center italic px-3 pt-1">
+                          {partialMulti
+                            ? `Carga el siguiente QR que falte (${
+                                receivedChunks[activeTransferId!].totalChunks -
+                                Object.keys(receivedChunks[activeTransferId!].chunks).length
+                              } restantes).`
+                            : loadedAny
+                            ? 'Carga otra imagen QR para reemplazar la lectura anterior.'
+                            : 'Selecciona una imagen PNG/JPG para empezar la lectura del QR.'}
+                        </p>
+                      ) : !scanSource ? (
+                        <p className="text-sm text-gray-500 text-center italic px-3 pt-1">
+                          Pulsa una de las dos opciones anteriores para obtener el QR.
+                        </p>
+                      ) : null}
+
+                      {scanSource && (
+                        <div className="flex justify-center pt-1">
+                          <button
+                            onClick={() => void handleRestartQRScan()}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-gray-700/60 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-600/40"
+                          >
+                            ↺ Reiniciar lectura QR
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
+
+                if (scanQRStep === 2) {
+                  return (
+                    <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4 space-y-4">
+                      <div>
+                        <p className="text-sm font-semibold text-gray-200">
+                          Paso 2 — Patrón de desbloqueo
+                        </p>
+                        <p className="text-xs text-gray-500 mt-0.5">
+                          {multi
+                            ? `Dibuja el patrón del dispositivo que envió los ${receivedChunks[activeTransferId!].totalChunks} QR.`
+                            : 'Dibuja el patrón de desbloqueo del dispositivo que envió el QR.'}
+                        </p>
+                      </div>
+
+                      <div className="rounded-md border border-gray-700 bg-gray-800/40 p-4 space-y-2">
+                        <div className="flex justify-center">
+                          <GesturePad
+                            onPatternComplete={(p) => setQrImportPattern(p)}
+                            minPoints={4}
+                            resetKey={qrImportPatternReset}
+                          />
+                        </div>
+                        <div className="flex flex-col items-center gap-1 min-h-[40px]">
+                          {qrImportPattern && qrImportPattern.length >= 4 ? (
+                            <p className="text-xs text-green-400">
+                              ✓ Patrón listo. Pulsa "Siguiente" para descifrar.
+                            </p>
+                          ) : qrImportPattern ? (
+                            <p className="text-xs text-amber-400/90">
+                              El patrón debe tener al menos 4 puntos.
+                            </p>
+                          ) : null}
+                        </div>
+                        {qrImportPattern && (
+                          <div className="flex justify-center pt-1">
+                            <button
+                              onClick={() => {
+                                setQrImportPattern(null);
+                                setQrImportPatternReset((k) => k + 1);
+                                setSuccess('');
+                              }}
+                              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-gray-700/60 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-600/40"
+                            >
+                              ↺ Reiniciar patrón
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="space-y-4">
+                    <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4 space-y-3">
+                      <div className="flex items-baseline justify-between gap-2 flex-wrap">
+                        <div>
+                          <p className="text-sm font-semibold text-gray-200">
+                            Paso 3 — Confirma la importación
+                          </p>
+                          <p className="text-xs text-gray-500 mt-0.5">
+                            Elige cómo integrar estas contraseñas en tu bóveda local.
+                          </p>
+                        </div>
+                        <span className="text-xs font-semibold text-gray-500">
+                          {scannedPasswords.length} contraseñas
+                        </span>
+                      </div>
+
+                      <div className="space-y-2">
+                        <label
+                          className={`flex items-start gap-3 p-3 rounded-md border transition-colors cursor-pointer ${
+                            importMode === 'merge'
+                              ? 'border-cyan-500/60 bg-cyan-500/5'
+                              : 'border-gray-600 bg-gray-800/40 hover:border-gray-500'
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            value="merge"
+                            checked={importMode === 'merge'}
+                            onChange={(e) => setImportMode(e.target.value as ImportMode)}
+                            className="mt-1 mr-1"
+                          />
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium text-gray-200">
+                              Agregar a las existentes
+                            </p>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                              Fusiona las nuevas contraseñas con las actuales.
+                            </p>
+                          </div>
+                        </label>
+                        <label
+                          className={`flex items-start gap-3 p-3 rounded-md border transition-colors cursor-pointer ${
+                            importMode === 'overwrite'
+                              ? 'border-cyan-500/60 bg-cyan-500/5'
+                              : 'border-gray-600 bg-gray-800/40 hover:border-gray-500'
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            value="overwrite"
+                            checked={importMode === 'overwrite'}
+                            onChange={(e) => setImportMode(e.target.value as ImportMode)}
+                            className="mt-1 mr-1"
+                          />
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium text-gray-200">Reemplazar todas</p>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                              Elimina las contraseñas actuales y deja solo las recibidas.
+                            </p>
+                          </div>
+                        </label>
+                      </div>
+
+                      <div className="rounded-md border border-gray-700 bg-gray-800/40 p-3">
+                        <p className="text-xs font-semibold text-gray-400 mb-2 uppercase tracking-wider">
+                          Vista previa
+                        </p>
+                        <div className="max-h-[240px] overflow-y-auto space-y-2 pr-1">
+                          {scannedPasswords.map((entry) => (
+                            <div
+                              key={entry.id}
+                              className="p-3 rounded-md bg-gray-800 border border-gray-700"
+                            >
+                              <p className="font-semibold text-cyan-400 truncate">{entry.site}</p>
+                              <p className="text-sm text-gray-300 truncate">{entry.username}</p>
+                              <p className="text-xs text-gray-500 mt-1 truncate">{entry.category}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+
+            {error && <p className="text-red-400 text-sm pl-1">{error}</p>}
+            {success &&
+              scanQRStep === 1 &&
+              !pendingQRPayload &&
+              !activeTransferId && <p className="text-green-400 text-sm pl-1">{success}</p>}
+
+            <div className="flex justify-between gap-3 pt-2">
+              <button
+                onClick={handleScanQRBack}
+                className="px-4 py-2 rounded-md bg-gray-600 hover:bg-gray-500 transition-colors min-w-[120px]"
+              >
+                Atrás
+              </button>
+              {(() => {
+                const readySingle = !!pendingQRPayload;
+                const multi = !!activeTransferId && !!receivedChunks[activeTransferId];
+                const readyMulti =
+                  multi &&
+                  Object.keys(receivedChunks[activeTransferId].chunks).length ===
+                    receivedChunks[activeTransferId].totalChunks;
+                const transferReady = readySingle || readyMulti;
+                const nextDisabled =
+                  (scanQRStep === 1 && !transferReady) ||
+                  (scanQRStep === 2 && (!qrImportPattern || qrImportPattern.length < 4)) ||
+                  (scanQRStep === 3 && scannedPasswords.length === 0);
+                return (
+                  <button
+                    onClick={() => void handleScanQRNext()}
+                    disabled={nextDisabled}
+                    className="px-5 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold disabled:opacity-50 disabled:cursor-not-allowed min-w-[200px]"
+                  >
+                    {scanQRStep === 3 ? 'Recibir contraseñas' : 'Siguiente'}
+                  </button>
+                );
+              })()}
             </div>
           </div>
         )}
@@ -319,4 +2529,4 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
   );
 };
 
-export default ImportExportModal; 
+export default ImportExportModal;
