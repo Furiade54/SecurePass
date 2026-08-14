@@ -47,4 +47,23 @@
 ::selection {
   background: #06B6D4;
   color: white;
+}
+
+/* QR Scanner animations */
+@keyframes qr-scan-line {
+  0%, 100% { top: 5%; }
+  50% { top: 95%; }
+}
+
+.animate-qr-scan-line {
+  animation: qr-scan-line 2s infinite ease-in-out;
+}
+
+@keyframes qr-reticle-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+.animate-qr-reticle-pulse {
+  animation: qr-reticle-pulse 2s infinite ease-in-out;
 } 

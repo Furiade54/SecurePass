@@ -4,7 +4,13 @@ import { Html5Qrcode } from 'html5-qrcode';
 import jsQR from 'jsqr';
 import { PasswordEntry } from '../types';
 import { EncryptedData, EncryptionService } from '../utils/encryption';
-import { ImportExportIcon } from './Icons';
+import {
+  ImportExportIcon,
+  ZapIcon,
+  ZapOffIcon,
+  SwitchCameraIcon,
+  CameraIcon
+} from './Icons';
 import GesturePad from './GesturePad';
 
 const patternToString = (pattern: number[]): string => pattern.join(',');
@@ -411,6 +417,10 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
   const [scannedPasswords, setScannedPasswords] = useState<PasswordEntry[]>([]);
   const [scanSource, setScanSource] = useState<ScanSource>(null);
   const [selectedImageName, setSelectedImageName] = useState('');
+  const [availableCameras, setAvailableCameras] = useState<{ id: string; label: string }[]>([]);
+  const [selectedCameraId, setSelectedCameraId] = useState<string>('');
+  const [hasTorch, setHasTorch] = useState(false);
+  const [torchOn, setTorchOn] = useState(false);
   const [receivedChunks, setReceivedChunks] = useState<ReceivedChunksMap>({});
   const [activeTransferId, setActiveTransferId] = useState<string | null>(null);
   const [scannerRestartKey, setScannerRestartKey] = useState(0);
@@ -441,6 +451,8 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
   });
 
   const stopQRScanner = useCallback(async () => {
+    setHasTorch(false);
+    setTorchOn(false);
     const scanner = qrScannerRef.current;
     if (!scanner) return;
 
@@ -461,6 +473,20 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
     qrScannerRef.current = null;
     isScannerRunningRef.current = false;
   }, []);
+
+  const toggleTorch = useCallback(async () => {
+    const scanner = qrScannerRef.current;
+    if (!scanner || !isScannerRunningRef.current) return;
+    try {
+      const nextState = !torchOn;
+      await scanner.applyVideoConstraints({
+        advanced: [{ torch: nextState }]
+      } as any);
+      setTorchOn(nextState);
+    } catch (err) {
+      console.warn('[camera-diagnostic] Failed to toggle torch:', err);
+    }
+  }, [torchOn]);
 
   const resetQRImportState = useCallback(() => {
     isScanLockedRef.current = false;
@@ -1126,10 +1152,35 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
     if (imageFileInputRef.current) {
       imageFileInputRef.current.value = '';
     }
+    setAvailableCameras([]);
+    setSelectedCameraId('');
     setSuccess('Abriendo cámara para escanear el QR...');
     setError('');
     setScanSource('camera');
     setScannerRestartKey((current) => current + 1);
+  };
+
+  const handleChangeCamera = async (newCameraId: string) => {
+    if (newCameraId === selectedCameraId) return;
+    setSelectedCameraId(newCameraId);
+    setHasTorch(false);
+    setTorchOn(false);
+    await stopQRScanner();
+    isScanLockedRef.current = false;
+    setSuccess(`Cambiando a cámara: ${availableCameras.find((c) => c.id === newCameraId)?.label || 'Seleccionada'}…`);
+    setError('');
+    setScannerRestartKey((k) => k + 1);
+  };
+
+  const handleToggleFrontBack = async () => {
+    setSelectedCameraId('');
+    setHasTorch(false);
+    setTorchOn(false);
+    await stopQRScanner();
+    isScanLockedRef.current = false;
+    setSuccess('Cambiando lente (frontal/trasera)…');
+    setError('');
+    setScannerRestartKey((k) => k + 1);
   };
 
   const handleRestartQRScan = async () => {
@@ -1200,32 +1251,328 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
       await stopQRScanner();
       isScanLockedRef.current = false;
 
+      // Track provisional que liberamos ANTES de entregar el flujo a html5-qrcode.
+      // Si el navegador/driver se cuelga al pedir facingMode: 'environment' (bug conocido
+      // en html5-qrcode 2.3.x con cámaras únicas), al menos nosotros cerramos los tracks.
+      let provisionalStream: MediaStream | null = null;
+      const killProvisionalStream = () => {
+        if (!provisionalStream) return;
+        try {
+          provisionalStream.getTracks().forEach((t) => {
+            try { t.stop(); } catch { /* ignore */ }
+          });
+        } catch { /* ignore */ }
+        provisionalStream = null;
+      };
+
       try {
+        // 🧪 Diagnóstico de permisos de cámara: pruebo getUserMedia DIRECTAMENTE
+        // (sin pasar por html5-qrcode) para aislar el fallo.
+        try {
+          if (
+            typeof navigator !== 'undefined' &&
+            navigator.mediaDevices &&
+            typeof navigator.mediaDevices.getUserMedia === 'function'
+          ) {
+            // eslint-disable-next-line no-console
+            console.log('[camera-diagnostic] solicitando permiso getUserMedia({video:true}) DIRECTO …');
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            // eslint-disable-next-line no-console
+            console.log('[camera-diagnostic] getUserMedia OK → tracks=', stream.getTracks());
+            stream.getTracks().forEach((track) => {
+              // eslint-disable-next-line no-console
+              console.log('[camera-diagnostic]   stop track:', track.kind, track.label, track.readyState);
+              track.stop();
+            });
+          } else {
+            // eslint-disable-next-line no-console
+            console.error(
+              '[camera-diagnostic] navigator.mediaDevices.getUserMedia NO EXISTE. Seguridad? HTTP? SecureContext=false? SecureContext=',
+              typeof window !== 'undefined' ? window.isSecureContext : 'N/A'
+            );
+          }
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error('[camera-diagnostic] getUserMedia DIRECTO falló:', err);
+        }
+
+        // 🧪 Esperamos 1 ciclo de pintura React para que el div condicional
+        // id="securepass-qr-reader" exista y tenga medidas.
+        if (typeof window !== 'undefined' && window.requestAnimationFrame) {
+          await new Promise<void>((r) => window.requestAnimationFrame(() => r()));
+        }
+        await new Promise<void>((r) => setTimeout(r, 50));
+
+        // 🧪 Diagnóstico del elemento del visor
+        const qrElement = document.getElementById(QR_READER_ELEMENT_ID);
+        // eslint-disable-next-line no-console
+        console.log(
+          '[camera-diagnostic] DOM elemento visor QR:',
+          qrElement
+            ? `OK — ${qrElement.offsetWidth}×${qrElement.offsetHeight}, visible=${
+                qrElement.offsetWidth > 0 && qrElement.offsetHeight > 0
+              }`
+            : 'NO EXISTE AÚN EN EL DOM'
+        );
+
+        if (!qrElement || qrElement.offsetWidth === 0 || qrElement.offsetHeight === 0) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            '[camera-diagnostic] el visor QR no está listo. Cancelando scanner.start para evitar fallo html5-qrcode.'
+          );
+          throw new DOMException(
+            'El contenedor del escáner QR aún no está disponible.',
+            'NotFoundError'
+          );
+        }
+
         const scanner = new Html5Qrcode(QR_READER_ELEMENT_ID);
         qrScannerRef.current = scanner;
 
-        await scanner.start(
-          { facingMode: 'environment' },
-          {
-            fps: 10,
-            qrbox: { width: 220, height: 220 },
-            aspectRatio: 1
-          },
-          async (decodedText) => {
-            if (cancelled || isScanLockedRef.current) return;
-            isScanLockedRef.current = true;
-            await handleParsedQRPayload(decodedText, 'camera');
-          },
-          () => {}
-        );
+        // 🧪 Wrapper scanner.start CON TIMEOUT de 4s.
+        // html5-qrcode a veces se cuelga "para siempre" cuando el driver no soporta
+        // facingMode: 'environment' en una cámara única. Con Promise.race evitamos
+        // dejar el usuario bloqueado sin feedback.
+        const tryStartWithTimeout = async (
+          config: object,
+          label: string,
+          timeoutMs = 4000
+        ): Promise<void> => {
+          // eslint-disable-next-line no-console
+          console.log(`[camera-diagnostic] scanner.start() "${label}" → config=`, config);
 
+          // 🛟 Stream provisional NUESTRO (antes que html5-qrcode haga el suyo)
+          // Para garantizar que cerramos hardware si el timeout dispara.
+          let streamBefore: MediaStream | null = null;
+          try {
+            if (
+              typeof navigator !== 'undefined' &&
+              navigator.mediaDevices?.getUserMedia
+            ) {
+              streamBefore = await navigator.mediaDevices.getUserMedia(
+                config as MediaStreamConstraints
+              );
+              streamBefore.getTracks().forEach((t) => t.stop());
+              streamBefore = null;
+              // eslint-disable-next-line no-console
+              console.log(
+                `[camera-diagnostic]   (our own test-call passed → hardware libre)`
+              );
+            }
+          } catch (preErr) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              `[camera-diagnostic]   nuestra llamada previa falló → probablemente la constraint no se pueda pedir (OK, html5-qrcode también lo hará).`,
+              preErr
+            );
+          } finally {
+            if (streamBefore) {
+              streamBefore.getTracks().forEach((t) => {
+                try { t.stop(); } catch { /* ignore */ }
+              });
+              streamBefore = null;
+            }
+          }
+
+          const startPromise = scanner.start(
+            config as Parameters<Html5Qrcode['start']>[0],
+            {
+              fps: 10,
+              qrbox: { width: 220, height: 220 },
+              aspectRatio: 1
+            },
+            async (decodedText) => {
+              if (cancelled || isScanLockedRef.current) return;
+              isScanLockedRef.current = true;
+              await handleParsedQRPayload(decodedText, 'camera');
+            },
+            () => {}
+          );
+
+          const timeoutPromise = new Promise<never>((_resolve, reject) => {
+            const id = window.setTimeout(() => {
+              window.clearTimeout(id);
+              reject(
+                Object.assign(new Error(`html5-qrcode scanner.start('${label}') no respondió en ${timeoutMs}ms. Forzando reintento.`), {
+                  name: 'ScannerStartTimeoutError'
+                })
+              );
+            }, timeoutMs);
+          });
+
+          await Promise.race([startPromise, timeoutPromise]);
+        };
+
+        type StartedMode = 'deviceId' | 'environment' | 'any';
+        let started: StartedMode | null = null;
+
+        try {
+          if (selectedCameraId) {
+            try {
+              await tryStartWithTimeout(
+                { deviceId: { exact: selectedCameraId } },
+                `deviceId:${selectedCameraId.slice(0, 6)}…`,
+                5000
+              );
+              started = 'deviceId';
+            } catch (deviceErr) {
+              const e2 = deviceErr as { name?: string; constraintName?: string };
+              // eslint-disable-next-line no-console
+              console.warn(
+                `[camera-diagnostic] scanner.start deviceId="${selectedCameraId}" falló → name=${e2.name}. Volviendo a estrategia por defecto.`
+              );
+              // No propagamos: intentamos el flujo standard (environment → any)
+            }
+          }
+
+          if (!started) {
+            try {
+              await tryStartWithTimeout({ facingMode: 'environment' }, 'environment', 4000);
+              started = 'environment';
+            } catch (startErr) {
+              const err = startErr as { name?: string; message?: string; constraintName?: string };
+              // eslint-disable-next-line no-console
+              console.warn(
+                `[camera-diagnostic] scanner.start facingMode=environment FALLÓ → name=${err.name}  constraint=${
+                  (err as unknown as { constraintName?: string }).constraintName ?? 'N/A'
+                }  message=${err.message ?? String(startErr)}`
+              );
+
+              const retryable =
+                err.name === 'OverconstrainedError' ||
+                err.name === 'NotFoundError' ||
+                err.name === 'NotReadableError' ||
+                err.name === 'ScannerStartTimeoutError' ||
+                (err as { constraintName?: string }).constraintName === 'facingMode';
+
+              if (retryable) {
+                // 🛟 Antes de reintentar: limpieza DRACONIANA de tracks por si el driver
+                // se quedó medio abierto tras el timeout o el fallo.
+                killProvisionalStream();
+                try {
+                  const devs = await navigator.mediaDevices?.enumerateDevices?.();
+                  // eslint-disable-next-line no-console
+                  console.debug(
+                    `[camera-diagnostic] enumerateDevices() antes del retry any-camera →`,
+                    devs
+                  );
+                } catch { /* ignore */ }
+
+                // eslint-disable-next-line no-console
+                console.log('[camera-diagnostic] → reintento scanner.start SIN restricciones de facingMode');
+
+                await tryStartWithTimeout({}, 'any-camera', 5000);
+                started = 'any';
+              } else {
+                throw startErr;
+              }
+            }
+          }
+        } catch (outerErr) {
+          if (!started) throw outerErr;
+        }
+
+        if (!started) {
+          throw new Error('No se pudo iniciar ninguna estrategia de cámara (deviceId/environment/any).');
+        }
+
+        // eslint-disable-next-line no-console
+        console.log(`[camera-diagnostic] ✅ scanner.start OK usando modo "${started}"`);
         isScannerRunningRef.current = true;
         setSuccess('Apunta la cámara al QR para continuar con la importación.');
-      } catch {
+
+        // 🔍 Detección de capacidades: linterna + cámaras disponibles
+        try {
+          // Intentar enumerar cámaras
+          if (
+            typeof navigator !== 'undefined' &&
+            navigator.mediaDevices?.enumerateDevices
+          ) {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const videoInputs = devices.filter((d) => d.kind === 'videoinput');
+            setAvailableCameras(
+              videoInputs.map((d, i) => ({
+                id: d.deviceId,
+                label: d.label || `Cámara ${i + 1}`
+              }))
+            );
+            // eslint-disable-next-line no-console
+            console.log(
+              `[camera-diagnostic] Cámaras detectadas: ${videoInputs.length}`,
+              videoInputs.map((d, i) => d.label || `Cámara ${i + 1}`)
+            );
+          }
+        } catch (camErr) {
+          console.warn('[camera-diagnostic] enumerateDevices falló (no crítico):', camErr);
+        }
+
+        try {
+          // Intentar detectar soporte de linterna / torch
+          let torchSupported = false;
+          // Vías posibles para llegar al MediaStreamTrack activo según versión de html5-qrcode
+          const scannerAny = qrScannerRef.current as unknown as {
+            getRunningTrack?: () => MediaStreamTrack | undefined;
+            getRunningTrackCamera?: () => MediaStreamTrack | undefined;
+            _activeTrack?: MediaStreamTrack;
+            _scanner?: { _activeTrack?: MediaStreamTrack };
+          };
+          const track: MediaStreamTrack | undefined =
+            scannerAny?.getRunningTrack?.() ||
+            scannerAny?.getRunningTrackCamera?.() ||
+            scannerAny?._activeTrack ||
+            scannerAny?._scanner?._activeTrack;
+          if (track) {
+            try {
+              const caps = (track.getCapabilities?.() as { torch?: boolean }) || {};
+              if (caps.torch === true) {
+                torchSupported = true;
+              }
+            } catch { /* ignore */ }
+          }
+          setHasTorch(torchSupported);
+          // eslint-disable-next-line no-console
+          console.log(
+            `[camera-diagnostic] Soporte de linterna: ${torchSupported ? 'SÍ' : 'NO'} (track detectado=${!!track})`
+          );
+        } catch (torchErr) {
+          console.warn('[camera-diagnostic] Detección de torch falló (no crítico):', torchErr);
+          setHasTorch(false);
+        }
+      } catch (err) {
+        killProvisionalStream();
+        const e = err as { name?: string; message?: string; constraintName?: string };
+        // eslint-disable-next-line no-console
+        console.error('[camera-diagnostic] fallo FINAL scanner.start html5-qrcode:', e);
         qrScannerRef.current = null;
         isScannerRunningRef.current = false;
         setSuccess('');
-        setError('No se pudo abrir la cámara. Revisa los permisos o usa un navegador compatible.');
+
+        const detalle =
+          [e.name, (e as { constraintName?: string }).constraintName]
+            .filter(Boolean)
+            .join(' · ') || serializeUnknownError(err);
+
+        if (e.name === 'ScannerStartTimeoutError') {
+          setError(
+            `El controlador de la cámara no respondió al pedir la configuración deseada. Reinicia la pestaña o usa "Cargar imagen QR". (Detalles: ${detalle})`
+          );
+        } else if (e.name === 'OverconstrainedError') {
+          setError(
+            `Tu dispositivo no tiene una cámara compatible con la configuración solicitada. Usa "Cargar imagen QR" para continuar. (Detalles: ${detalle})`
+          );
+        } else if (e.name === 'NotFoundError') {
+          setError(
+            `No se detectó ninguna cámara disponible en este equipo. Usa "Cargar imagen QR" para continuar. (Detalles: ${detalle})`
+          );
+        } else if (e.name === 'NotReadableError') {
+          setError(
+            `La cámara está siendo usada por otra aplicación (Zoom, Meet, Teams…). Ciérrala y vuelve a intentarlo o usa "Cargar imagen QR". (Detalles: ${detalle})`
+          );
+        } else {
+          setError(
+            `No se pudo abrir la cámara. Revisa los permisos o usa "Cargar imagen QR". (Detalles: ${detalle})`
+          );
+        }
       }
     };
 
@@ -1235,7 +1582,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
       cancelled = true;
       void stopQRScanner();
     };
-  }, [handleParsedQRPayload, isOpen, mode, scanSource, scannerRestartKey, stopQRScanner]);
+  }, [handleParsedQRPayload, isOpen, mode, scanSource, scannerRestartKey, selectedCameraId, stopQRScanner]);
 
   useEffect(() => {
     if (!isOpen || mode !== 'scanQR') {
@@ -2285,11 +2632,90 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
                       />
 
                       {scanSource === 'camera' && !pendingQRPayload && (
-                        <div className="rounded-lg border border-gray-700 overflow-hidden">
-                          <div
-                            id={QR_READER_ELEMENT_ID}
-                            className="w-full min-h-[260px] rounded-lg overflow-hidden bg-black"
-                          />
+                        <div className="rounded-lg border border-gray-700 overflow-hidden space-y-2">
+                          {(hasTorch || availableCameras.length > 1) && (
+                            <div className="flex items-center justify-between gap-2 px-3 py-2 bg-gray-900/80 border-b border-gray-700">
+                              <div className="flex items-center gap-1.5">
+                                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                                <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+                                  Cámara activa
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                {hasTorch && (
+                                  <button
+                                    onClick={() => void toggleTorch()}
+                                    className={`p-1.5 rounded-md border text-[11px] font-medium flex items-center gap-1 transition-all ${
+                                      torchOn
+                                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 shadow-[0_0_12px_rgba(245,158,11,0.15)]'
+                                        : 'bg-gray-800 text-gray-300 border-gray-600 hover:bg-gray-700'
+                                    }`}
+                                    title={torchOn ? 'Apagar linterna' : 'Encender linterna'}
+                                  >
+                                    {torchOn ? (
+                                      <ZapIcon className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
+                                    ) : (
+                                      <ZapOffIcon className="w-3.5 h-3.5" />
+                                    )}
+                                    <span className="hidden sm:inline">
+                                      {torchOn ? 'Linterna On' : 'Linterna'}
+                                    </span>
+                                  </button>
+                                )}
+                                {availableCameras.length > 1 && (
+                                  <button
+                                    onClick={() => void handleToggleFrontBack()}
+                                    className="p-1.5 rounded-md border bg-gray-800 text-gray-300 border-gray-600 hover:bg-gray-700 transition-all flex items-center gap-1 text-[11px] font-medium"
+                                    title="Cambiar lente (frontal/trasera)"
+                                  >
+                                    <SwitchCameraIcon className="w-3.5 h-3.5 text-cyan-400" />
+                                    <span className="hidden sm:inline">Cambiar</span>
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="relative w-full bg-black">
+                            <div
+                              id={QR_READER_ELEMENT_ID}
+                              className="w-full min-h-[260px] overflow-hidden bg-black"
+                            />
+                            <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                              <div
+                                className="relative flex items-center justify-center animate-qr-reticle-pulse"
+                                style={{ width: '220px', height: '220px' }}
+                              >
+                                <div className="absolute inset-0 rounded-xl border border-cyan-400/40 shadow-[0_0_40px_rgba(34,211,238,0.15)]" />
+                                <div className="absolute top-0 left-0 w-6 h-6 border-t-[3px] border-l-[3px] border-cyan-400 rounded-tl-lg" />
+                                <div className="absolute top-0 right-0 w-6 h-6 border-t-[3px] border-r-[3px] border-cyan-400 rounded-tr-lg" />
+                                <div className="absolute bottom-0 left-0 w-6 h-6 border-b-[3px] border-l-[3px] border-cyan-400 rounded-bl-lg" />
+                                <div className="absolute bottom-0 right-0 w-6 h-6 border-b-[3px] border-r-[3px] border-cyan-400 rounded-br-lg" />
+                                <div className="w-[calc(100%-8px)] h-0.5 left-1 bg-gradient-to-r from-transparent via-cyan-400 to-transparent shadow-[0_0_12px_rgba(34,211,238,0.7)] absolute animate-qr-scan-line" />
+                              </div>
+                            </div>
+                          </div>
+
+                          {availableCameras.length > 1 && (
+                            <div className="flex items-center justify-between gap-2 px-3 py-2 bg-gray-900/60 border-t border-gray-700 text-[11px]">
+                              <span className="text-gray-400 font-medium flex items-center gap-1.5">
+                                <CameraIcon className="w-3.5 h-3.5 text-cyan-400" />
+                                Seleccionar lente:
+                              </span>
+                              <select
+                                value={selectedCameraId}
+                                onChange={(e) => void handleChangeCamera(e.target.value)}
+                                className="bg-gray-800 text-gray-200 border border-gray-600 rounded-md px-2 py-1 text-[11px] focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/40"
+                              >
+                                <option value="">Automática (por defecto)</option>
+                                {availableCameras.map((cam) => (
+                                  <option key={cam.id} value={cam.id}>
+                                    {cam.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
                         </div>
                       )}
 
