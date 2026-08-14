@@ -79,7 +79,7 @@ interface QRTransferPassword {
 
 const QR_READER_ELEMENT_ID = 'securepass-qr-reader';
 const QR_IMAGE_WORKER_ELEMENT_ID = 'securepass-qr-image-worker';
-const MAX_QR_PAYLOAD_BYTES = 1200;
+const MAX_QR_PAYLOAD_BYTES = 720;
 const QR_V3_FIXED_OVERHEAD_ESTIMATE_BYTES = 220;
 const QR_IMAGE_ERROR_MESSAGE = 'No se detecto un QR legible. Usa una imagen con el codigo completo y buena resolucion.';
 
@@ -818,7 +818,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
     }
 
     try {
-      const logicalSize = 260;
+      const logicalSize = 300;
       if (!qrSvg.getAttribute('width')) qrSvg.setAttribute('width', String(logicalSize));
       if (!qrSvg.getAttribute('height')) qrSvg.setAttribute('height', String(logicalSize));
       if (!qrSvg.getAttribute('viewBox')) qrSvg.setAttribute('viewBox', `0 0 ${logicalSize} ${logicalSize}`);
@@ -828,8 +828,8 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
       const svgBlob = new Blob([svgMarkup], { type: 'image/svg+xml;charset=utf-8' });
       const svgUrl = URL.createObjectURL(svgBlob);
 
-      const canvasSize = 1080;
-      const paddingPx = 80;
+      const canvasSize = 1440;
+      const paddingPx = 120;
       const innerSize = canvasSize - paddingPx * 2;
 
       const image = new Image();
@@ -2652,7 +2652,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
                       <div className="flex flex-col items-center gap-3">
                         <div className="bg-white p-3 rounded-lg shadow-lg">
                           <div ref={qrCodeContainerRef}>
-                            <QRCode value={generatedQRData} size={260} level="Q" />
+                            <QRCode value={generatedQRData} size={300} level="Q" />
                           </div>
                         </div>
                         <div className="flex flex-col items-center gap-2">
