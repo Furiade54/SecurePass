@@ -21,6 +21,21 @@ interface ImportExportModalProps {
   onImport: (passwords: PasswordEntry[]) => void;
   onExportSuccess?: () => void;
   passwords: PasswordEntry[];
+  /**
+   * 'modal'     → comportamiento histórico: overlay centrado, padding, max-w, max-h-90vh.
+   *                Usado para export/import y selector de acción.
+   * 'fullscreen'→ vista de página, ancho y alto completos.
+   *                Ideal para flujos shareQR / scanQR en móvil:
+   *                el scanner de cámara ocupa todo el ancho del viewport.
+   * 'auto'      → si el modo interno es shareQR o scanQR → fullscreen, si no → modal.
+   *                Valor por defecto para no romper llamadas existentes.
+   */
+  variant?: 'modal' | 'fullscreen' | 'auto';
+  /**
+   * Forzar modo inicial interno cuando se abre desde acceso directo.
+   * Ej: abrir directamente en 'scanQR' saltándose el selector.
+   */
+  initialMode?: Mode | null;
 }
 
 type Mode = 'select' | 'export' | 'import' | 'shareQR' | 'scanQR';
@@ -392,7 +407,9 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
   onClose,
   onImport,
   onExportSuccess,
-  passwords
+  passwords,
+  variant = 'auto',
+  initialMode = null
 }) => {
   const [mode, setMode] = useState<Mode>('select');
   const [backupPattern, setBackupPattern] = useState<number[] | null>(null);
@@ -403,6 +420,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [selectedFileName, setSelectedFileName] = useState('');
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [selectedPasswordIds, setSelectedPasswordIds] = useState<string[]>([]);
   const [qrSharePattern, setQrSharePattern] = useState<number[] | null>(null);
   const [qrSharePatternReset, setQrSharePatternReset] = useState(0);
@@ -426,6 +444,9 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
   const [scannerRestartKey, setScannerRestartKey] = useState(0);
   const [scanQRStep, setScanQRStep] = useState<1 | 2 | 3>(1);
   const [scanQRAnimKey, setScanQRAnimKey] = useState(0);
+  const [importStep, setImportStep] = useState<1 | 2 | 3>(1);
+  const [importAnimKey, setImportAnimKey] = useState(0);
+  const [previewImportedPasswords, setPreviewImportedPasswords] = useState<PasswordEntry[] | null>(null);
   const [importPattern, setImportPattern] = useState<number[] | null>(null);
   const [importPatternReset, setImportPatternReset] = useState(0);
   const [patternError, setPatternError] = useState<string>('');
@@ -437,6 +458,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
   const isScanLockedRef = useRef(false);
   const scanQRAutoDecryptGuardRef = useRef<string>('');
   const shareQRAutoGenerateGuardRef = useRef<string>('');
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (patternError) {
@@ -444,6 +466,42 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
       return () => clearTimeout(t);
     }
   }, [patternError]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    if (initialMode) {
+      setMode(initialMode);
+    } else {
+      setMode('select');
+    }
+  }, [isOpen, initialMode]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const node = scrollContainerRef.current;
+    const run = () => {
+      if (node) {
+        try {
+          node.scrollTop = 0;
+          node.scrollTo?.({ top: 0, behavior: 'instant' as ScrollBehavior });
+        } catch {
+          /* ignore old browsers */
+        }
+      }
+      try {
+        window.scrollTo?.({ top: 0, behavior: 'instant' as ScrollBehavior });
+      } catch {
+        /* ignore */
+      }
+    };
+    run();
+    const t = setTimeout(run, 0);
+    const t2 = setTimeout(run, 60);
+    return () => {
+      clearTimeout(t);
+      clearTimeout(t2);
+    };
+  }, [isOpen, mode, scanQRStep, shareQRStep]);
 
   const [lastImportMode, setLastImportMode] = useState<ImportMode>(() => {
     const saved = localStorage.getItem('vault_last_import_mode');
@@ -551,7 +609,11 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
     }
 
     if (nextMode !== 'import') {
+      setImportStep(1);
+      setImportAnimKey((k) => k + 1);
+      setPreviewImportedPasswords(null);
       setSelectedFileName('');
+      setSelectedFile(null);
       setImportPattern(null);
       setImportPatternReset((k) => k + 1);
       if (vaultFileInputRef.current) {
@@ -631,7 +693,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
       const encrypted = EncryptionService.encrypt(jsonData, patternToString(backupPattern));
 
       const fileName = `respaldo-boveda-${new Date().toISOString().split('T')[0]}.vault`;
-      const blob = new Blob([JSON.stringify(encrypted)], { type: 'application/json' });
+      const blob = new Blob([JSON.stringify(encrypted)], { type: 'application/octet-stream' });
       const url = URL.createObjectURL(blob);
 
       const a = document.createElement('a');
@@ -649,43 +711,6 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
       }, 2000);
     } catch (error) {
       setError('Error al exportar: ' + (error as Error).message);
-    }
-  };
-
-  const handleImport = async () => {
-    if (!importPattern) {
-      setError('Dibuja el patrón de desbloqueo del respaldo');
-      return;
-    }
-
-    const file = vaultFileInputRef.current?.files?.[0];
-    if (!file) {
-      setError('Por favor selecciona un archivo');
-      return;
-    }
-
-    try {
-      const text = await file.text();
-      const encrypted = JSON.parse(text);
-      const decryptedJson = EncryptionService.decrypt(encrypted, patternToString(importPattern));
-      const importData = JSON.parse(decryptedJson);
-
-      if (!importData.passwords || !Array.isArray(importData.passwords)) {
-        throw new Error('Formato de archivo inválido');
-      }
-
-      localStorage.setItem('vault_last_import_mode', importMode);
-      setLastImportMode(importMode);
-
-      const importedPasswords = normalizePasswords(importData.passwords);
-
-      onImport(importedPasswords);
-      setSuccess('Archivo importado exitosamente');
-      setTimeout(() => {
-        void handleClose();
-      }, 2000);
-    } catch (error) {
-      setError('Error al importar: ' + (error as Error).message);
     }
   };
 
@@ -1135,6 +1160,83 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
 
     if (scanQRStep === 3) {
       await handleImportFromQR();
+    }
+  };
+
+  const handleImportBack = () => {
+    setError('');
+    if (importStep === 1) {
+      void changeMode('select');
+      return;
+    }
+    if (importStep === 2) {
+      setImportStep(1);
+      setImportAnimKey((k) => k + 1);
+      return;
+    }
+    if (importStep === 3) {
+      setImportStep(2);
+      setImportAnimKey((k) => k + 1);
+    }
+  };
+
+  const handleImportNext = async () => {
+    setError('');
+    if (importStep === 1) {
+      if (!selectedFile) {
+        setError('Selecciona un archivo .vault antes de continuar.');
+        return;
+      }
+      setImportStep(2);
+      setImportAnimKey((k) => k + 1);
+      return;
+    }
+    if (importStep === 2) {
+      if (!importPattern || importPattern.length < 4) {
+        setError('Dibuja el patrón de desbloqueo antes de continuar.');
+        return;
+      }
+      if (!selectedFile) {
+        setError('Selecciona un archivo .vault válido.');
+        return;
+      }
+      try {
+        const text = await selectedFile.text();
+        const encrypted = JSON.parse(text);
+        const decryptedJson = EncryptionService.decrypt(encrypted, patternToString(importPattern));
+        const importData = JSON.parse(decryptedJson);
+        if (!importData.passwords || !Array.isArray(importData.passwords)) {
+          throw new Error('Formato de archivo inválido');
+        }
+        const normalized = normalizePasswords(importData.passwords);
+        setPreviewImportedPasswords(normalized);
+        setSuccess(
+          `Archivo válido. Se van a restaurar ${normalized.length} contraseña${normalized.length === 1 ? '' : 's'}.`
+        );
+      } catch (err) {
+        setError('Error al leer el archivo o patrón incorrecto: ' + (err as Error).message);
+        return;
+      }
+      setImportStep(3);
+      setImportAnimKey((k) => k + 1);
+      return;
+    }
+    if (importStep === 3) {
+      if (!previewImportedPasswords || previewImportedPasswords.length === 0) {
+        setError('No hay contraseñas listas para importar. Vuelve al paso 2.');
+        return;
+      }
+      try {
+        localStorage.setItem('vault_last_import_mode', importMode);
+        setLastImportMode(importMode);
+        onImport(previewImportedPasswords);
+        setSuccess('Archivo importado exitosamente');
+        setTimeout(() => {
+          void handleClose();
+        }, 2000);
+      } catch (err) {
+        setError('Error al importar: ' + (err as Error).message);
+      }
     }
   };
 
@@ -1699,77 +1801,170 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
 
   if (!isOpen) return null;
 
-  const modalMaxWidth = mode === 'shareQR' || mode === 'scanQR' ? 'max-w-4xl' : 'max-w-md';
+  const isQrFlow = mode === 'shareQR' || mode === 'scanQR';
+  // Solamente el selector menú ('select') queda en modal centrado.
+  // Cualquier operación real (export/import JSON · share/scan QR) ocupa 100% pantalla
+  // para máxima densidad de información y experiencia similar en todos los flujos.
+  const isFullscreenFlow =
+    mode === 'export' || mode === 'import' || mode === 'shareQR' || mode === 'scanQR';
+  const resolvedVariant: 'modal' | 'fullscreen' =
+    variant === 'auto' ? (isFullscreenFlow ? 'fullscreen' : 'modal') : variant;
 
-  return (
-    <div className="fixed inset-0 bg-black bg-opacity-70 flex justify-center items-center z-50 p-6">
-      <div className={`bg-gray-800 rounded-lg shadow-xl p-6 w-full ${modalMaxWidth} text-gray-200 animate-fade-in-up max-h-[90vh] overflow-y-auto`}>
-        <h2 className="text-2xl font-bold mb-6 flex items-center">
-          <ImportExportIcon className="w-6 h-6 mr-2 text-cyan-400" />
-          {mode === 'select' && 'Gestionar bóveda'}
-          {mode === 'export' && 'Crear respaldo'}
-          {mode === 'import' && 'Restaurar respaldo'}
-          {mode === 'shareQR' && 'Enviar por QR'}
-          {mode === 'scanQR' && 'Recibir por QR'}
-        </h2>
+  const titleText =
+    mode === 'select'
+      ? 'Gestionar bóveda'
+      : mode === 'export'
+      ? 'Crear respaldo'
+      : mode === 'import'
+      ? 'Restaurar respaldo'
+      : mode === 'shareQR'
+      ? 'Enviar por QR'
+      : 'Recibir por QR';
 
+  const TitleHeader: React.FC<{ showCloseButton?: boolean }> = ({ showCloseButton = true }) => (
+    <div className="flex items-center justify-between gap-3 flex-shrink-0">
+      <h2 className={`font-bold flex items-center min-w-0 ${resolvedVariant === 'fullscreen' ? 'text-lg sm:text-xl' : 'text-2xl'}`}>
+        <ImportExportIcon className={`flex-shrink-0 text-cyan-400 ${resolvedVariant === 'fullscreen' ? 'w-5 h-5 mr-1.5' : 'w-6 h-6 mr-2'}`} />
+        <span className="truncate">{titleText}</span>
+      </h2>
+      {showCloseButton && (
+        <button
+          onClick={() => void handleClose()}
+          className={`flex-shrink-0 inline-flex items-center justify-center rounded-md border border-gray-600 text-gray-300 hover:text-white hover:bg-gray-700 transition-colors ${resolvedVariant === 'fullscreen' ? 'w-8 h-8' : 'w-9 h-9'}`}
+          aria-label="Cerrar"
+          title="Cerrar"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4 sm:w-5 sm:h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      )}
+    </div>
+  );
+
+  const overlayOuter =
+    resolvedVariant === 'fullscreen'
+      ? 'fixed inset-0 z-50 bg-gray-900 text-gray-200 flex flex-col h-screen w-screen animate-in fade-in duration-150'
+      : 'fixed inset-0 bg-black bg-opacity-70 flex justify-center items-center z-50 p-6';
+  const innerBody =
+    resolvedVariant === 'fullscreen'
+      ? `space-y-3 sm:space-y-4`
+      : `bg-gray-800 rounded-lg shadow-xl p-6 w-full text-gray-200 animate-fade-in-up overflow-y-auto ${
+          isQrFlow ? 'max-w-4xl max-h-[90vh]' : 'max-w-md max-h-[90vh]'
+        }`;
+
+  const contentModes = (
+    <>
         {mode === 'select' && (
-          <div className="space-y-6">
+          <div className="space-y-5 sm:space-y-6">
             <p className="text-gray-400">
               Crea o restaura un respaldo, o transfiere contraseñas entre dispositivos.
             </p>
 
-            <div className="space-y-3">
-              <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">
-                Respaldos
+            {/* ===== SECCIÓN 1 — RESPALDOS JSON ===== */}
+            <div className="space-y-2.5">
+              <div className="flex items-center gap-2 flex-wrap">
+                <p className="text-xs font-bold uppercase tracking-wider text-gray-500">
+                  Respaldos
+                </p>
+                <span className="inline-flex items-center gap-1 text-[10px] sm:text-[11px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-md bg-indigo-500/10 text-indigo-300 border border-indigo-500/30">
+                  {'{ }'}  JSON · Archivo
+                </span>
+              </div>
+              <p className="text-xs text-gray-500 -mt-1">
+                Copia de seguridad completa en archivo para guardar en la nube o PC.
               </p>
-              <div className="space-y-2">
+              <div className="space-y-2 pt-1">
                 <button
                   onClick={() => void changeMode('export')}
-                  className="w-full px-4 py-3 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold"
+                  className="group w-full text-left px-3 sm:px-4 py-2.5 sm:py-3 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold"
                 >
-                  Crear respaldo
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="flex items-center min-w-0">
+                      <span className="hidden sm:inline w-7 h-7 mr-3 inline-flex items-center justify-center rounded-md bg-cyan-500/20 text-cyan-100 border border-cyan-400/30 text-xs font-bold">
+                        ⤓
+                      </span>
+                      Crear respaldo
+                    </span>
+                    <span className="hidden sm:inline-flex items-center text-[11px] text-cyan-100/80 font-normal">
+                      Exporta JSON
+                    </span>
+                  </div>
                 </button>
                 <button
                   onClick={() => void changeMode('import')}
-                  className="w-full px-4 py-3 rounded-md bg-gray-700 hover:bg-gray-600 transition-colors font-semibold border border-gray-600"
+                  className="group w-full text-left px-3 sm:px-4 py-2.5 sm:py-3 rounded-md bg-gray-700 hover:bg-gray-600 transition-colors font-semibold border border-gray-600"
                 >
-                  Restaurar respaldo
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="flex items-center min-w-0">
+                      <span className="hidden sm:inline w-7 h-7 mr-3 inline-flex items-center justify-center rounded-md bg-gray-600/70 text-gray-200 border border-gray-500/40 text-xs font-bold">
+                        ⤒
+                      </span>
+                      Restaurar respaldo
+                    </span>
+                    <span className="hidden sm:inline-flex items-center text-[11px] text-gray-300/80 font-normal">
+                      Importa JSON
+                    </span>
+                  </div>
                 </button>
               </div>
             </div>
 
-            <div className="relative flex items-center py-1">
-              <div className="flex-grow border-t border-gray-700" />
-              <span className="flex-shrink mx-4 text-xs uppercase tracking-wider text-gray-500 font-semibold">
-                Transferencia QR
-              </span>
-              <div className="flex-grow border-t border-gray-700" />
-            </div>
-
-            <div className="space-y-3">
-              <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">
-                Transferencia entre dispositivos
+            {/* ===== SECCIÓN 2 — TRANSFERENCIA QR ===== */}
+            <div className="space-y-2.5 pt-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <p className="text-xs font-bold uppercase tracking-wider text-gray-500">
+                  Transferencia entre dispositivos
+                </p>
+                <span className="inline-flex items-center gap-1 text-[10px] sm:text-[11px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-md bg-cyan-500/10 text-cyan-300 border border-cyan-500/30">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 inline-block -mt-[1px]" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                    <path fillRule="evenodd" d="M3 4a1 1 0 011-1h3a1 1 0 011 1v3a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm2 3a1 1 0 011-1zm7 0a1 1 0 01.707.293L7.707 6.293a1 1 0 11-1.414-1.414l3-3A1 1 0 0110 3zm-1 7a1 1 0 011-1h2v2H10a1 1 0 110-2zm-3 6a1 1 0 011-1h3a1 1 0 011 1v3a1 1 0 01-1 1H7a1 1 0 01-1-1v-3zm6-6a1 1 0 011-1h3a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-3zM17 10a1 1 0 011-1h.001 2.293l2.293-2.293a1 1 0 011.414 1.414l-3 3A1 1 0 0117 10z" clipRule="evenodd" />
+                  </svg>
+                  Escaneo QR · Cámara
+                </span>
+              </div>
+              <p className="text-xs text-gray-500 -mt-1">
+                De móvil a móvil usando la cámara. Ideal para pasar contraseñas sin salir de la app.
               </p>
-              <div className="space-y-2">
+              <div className="space-y-2 pt-1">
                 <button
                   onClick={() => void changeMode('shareQR')}
-                  className="w-full px-4 py-3 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold"
+                  className="group w-full text-left px-3 sm:px-4 py-2.5 sm:py-3 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold"
                 >
-                  Enviar por QR
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="flex items-center min-w-0">
+                      <span className="hidden sm:inline w-7 h-7 mr-3 inline-flex items-center justify-center rounded-md bg-cyan-500/20 text-cyan-100 border border-cyan-400/30 text-sm">
+                        →
+                      </span>
+                      Enviar por QR
+                    </span>
+                    <span className="hidden sm:inline-flex items-center text-[11px] text-cyan-100/80 font-normal">
+                      Genera códigos QR
+                    </span>
+                  </div>
                 </button>
                 <button
                   onClick={() => void changeMode('scanQR')}
-                  className="w-full px-4 py-3 rounded-md bg-gray-700 hover:bg-gray-600 transition-colors font-semibold border border-gray-600"
+                  className="group w-full text-left px-3 sm:px-4 py-2.5 sm:py-3 rounded-md bg-gray-700 hover:bg-gray-600 transition-colors font-semibold border border-gray-600"
                 >
-                  Recibir por QR
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="flex items-center min-w-0">
+                      <span className="hidden sm:inline w-7 h-7 mr-3 inline-flex items-center justify-center rounded-md bg-gray-600/70 text-gray-200 border border-gray-500/40 text-sm">
+                        ←
+                      </span>
+                      Recibir por QR
+                    </span>
+                    <span className="hidden sm:inline-flex items-center text-[11px] text-gray-300/80 font-normal">
+                      Usa la cámara
+                    </span>
+                  </div>
                 </button>
               </div>
             </div>
 
             <button
               onClick={() => void handleClose()}
-              className="w-full px-4 py-2 rounded-md bg-gray-700 hover:bg-gray-600 transition-colors mt-2"
+              className="w-full px-4 py-2 rounded-md bg-gray-700 hover:bg-gray-600 transition-colors mt-1"
             >
               Cancelar
             </button>
@@ -1782,7 +1977,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
               Crea una copia encriptada de toda tu bóveda. Tendrás que confirmar el mismo patrón dos veces.
             </p>
 
-            <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4 space-y-3">
+            <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-baseline gap-2">
                   <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-cyan-500/10 text-cyan-400 text-xs font-bold border border-cyan-500/30">
@@ -1866,163 +2061,341 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
         )}
 
         {mode === 'import' && (
-          <div className="space-y-4">
-            <p className="text-gray-400">
-              Restaura una copia de seguridad desde un archivo <code className="px-1 rounded bg-gray-700/60 text-cyan-300 text-xs">.vault</code>.
-            </p>
+          <div key={`import-${importAnimKey}`} className="space-y-3 sm:space-y-4">
+            <div className="space-y-1">
+              <p className="text-gray-400 text-sm">
+                Restaura una copia de seguridad desde un archivo <code className="px-1 rounded bg-gray-700/60 text-cyan-300 text-xs">.vault</code> siguiendo este flujo guiado.
+              </p>
+            </div>
 
-            <div className="space-y-3">
-              <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4">
-                <div className="flex items-baseline gap-2 mb-2">
-                  <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-cyan-500/10 text-cyan-400 text-xs font-bold border border-cyan-500/30">
-                    1
-                  </span>
-                  <label className="text-sm font-semibold text-gray-200">
-                    Archivo de respaldo
-                  </label>
-                </div>
-                <button
-                  onClick={handleVaultFileSelect}
-                  className="w-full p-3 bg-gray-700 rounded-md border border-gray-600 hover:bg-gray-600 transition-colors text-left"
-                >
-                  {selectedFileName || 'Seleccionar archivo .vault...'}
-                </button>
-                <input
-                  ref={vaultFileInputRef}
-                  type="file"
-                  accept=".vault"
-                  onChange={(e) => setSelectedFileName(e.target.files?.[0]?.name || '')}
-                  className="hidden"
-                />
-                {selectedFileName && (
-                  <p className="mt-2 text-xs text-green-400">✓ Archivo cargado: {selectedFileName}</p>
-                )}
-              </div>
-
-              <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4">
-                <div className="flex items-baseline gap-2 mb-2">
-                  <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-cyan-500/10 text-cyan-400 text-xs font-bold border border-cyan-500/30">
-                    2
-                  </span>
-                  <label className="text-sm font-semibold text-gray-200">
-                    Modo de restauración
-                  </label>
-                </div>
-                <div className="space-y-2">
-                  <label className={`flex items-start gap-3 p-3 rounded-md border transition-colors cursor-pointer ${
-                    importMode === 'merge' ? 'border-cyan-500/60 bg-cyan-500/5' : 'border-gray-600 bg-gray-800/40 hover:border-gray-500'
-                  }`}>
-                    <input
-                      type="radio"
-                      value="merge"
-                      checked={importMode === 'merge'}
-                      onChange={(e) => setImportMode(e.target.value as ImportMode)}
-                      className="mt-1 mr-1"
-                    />
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium text-gray-200">Agregar a las existentes</p>
-                      <p className="text-xs text-gray-500 mt-0.5">Fusiona las contraseñas nuevas con las que ya tienes. Se actualizarán aquellas con el mismo sitio y usuario.</p>
+            <div className="pt-0.5 pb-1.5 sm:pt-1 sm:pb-2">
+              <div className="max-w-[420px] mx-auto">
+                <div className="flex items-start justify-between px-0.5 sm:px-1">
+                  <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
+                    <div
+                      className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${
+                        importStep > 1
+                          ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
+                          : importStep === 1
+                          ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
+                          : 'bg-gray-800 border-gray-600 text-gray-500'
+                      }`}
+                    >
+                      {importStep > 1 ? '✓' : '1'}
                     </div>
-                  </label>
-                  <label className={`flex items-start gap-3 p-3 rounded-md border transition-colors cursor-pointer ${
-                    importMode === 'overwrite' ? 'border-cyan-500/60 bg-cyan-500/5' : 'border-gray-600 bg-gray-800/40 hover:border-gray-500'
-                  }`}>
-                    <input
-                      type="radio"
-                      value="overwrite"
-                      checked={importMode === 'overwrite'}
-                      onChange={(e) => setImportMode(e.target.value as ImportMode)}
-                      className="mt-1 mr-1"
-                    />
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium text-gray-200">Reemplazar todas</p>
-                      <p className="text-xs text-gray-500 mt-0.5">
-                        Elimina las contraseñas actuales y deja solo las del archivo. Esta acción no se puede deshacer.
+                    <div className="text-center">
+                      <p
+                        className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${
+                          importStep >= 1 ? 'text-gray-200' : 'text-gray-500'
+                        }`}
+                      >
+                        Archivo
                       </p>
                     </div>
-                  </label>
-                </div>
-              </div>
-
-              <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4 space-y-3">
-                <div className="flex items-baseline gap-2">
-                  <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-cyan-500/10 text-cyan-400 text-xs font-bold border border-cyan-500/30">
-                    3
-                  </span>
-                  <p className="text-sm font-semibold text-gray-200">
-                    Patrón de desbloqueo del respaldo
-                  </p>
-                </div>
-                <p className="text-xs text-gray-500">
-                  Dibuja el patrón con el que se protegió este archivo cuando se creó.
-                </p>
-                <div className="flex justify-center">
-                  <GesturePad
-                    onPatternComplete={(p) => {
-                      setImportPattern(p);
-                      if (!selectedFileName) {
-                        setSuccess('Patrón listo. Selecciona el archivo de respaldo para restaurar.');
-                      }
-                    }}
-                    minPoints={4}
-                    resetKey={importPatternReset}
-                  />
-                </div>
-                {importPattern && (
-                  <p className="text-center text-xs text-green-400">✓ Patrón introducido.</p>
-                )}
-                {importPattern && (
-                  <div className="flex justify-center pt-1">
-                    <button
-                      onClick={() => {
-                        setImportPattern(null);
-                        setImportPatternReset((k) => k + 1);
-                        setSuccess('');
-                      }}
-                      className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-gray-700/60 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-600/40"
-                    >
-                      ↺ Reiniciar patrón
-                    </button>
                   </div>
-                )}
+
+                  <div className="flex-1 flex items-center pt-3 sm:pt-4 mx-0.5 sm:mx-1">
+                    <div
+                      className={`h-0.5 w-full rounded-full transition-colors ${
+                        importStep > 1 ? 'bg-cyan-500' : 'bg-gray-700'
+                      }`}
+                    />
+                  </div>
+
+                  <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
+                    <div
+                      className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${
+                        importStep > 2
+                          ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
+                          : importStep === 2
+                          ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
+                          : 'bg-gray-800 border-gray-600 text-gray-500'
+                      }`}
+                    >
+                      {importStep > 2 ? '✓' : '2'}
+                    </div>
+                    <div className="text-center">
+                      <p
+                        className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${
+                          importStep >= 2 ? 'text-gray-200' : 'text-gray-500'
+                        }`}
+                      >
+                        Patrón
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex-1 flex items-center pt-3 sm:pt-4 mx-0.5 sm:mx-1">
+                    <div
+                      className={`h-0.5 w-full rounded-full transition-colors ${
+                        importStep > 2 ? 'bg-cyan-500' : 'bg-gray-700'
+                      }`}
+                    />
+                  </div>
+
+                  <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
+                    <div
+                      className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${
+                        importStep >= 3
+                          ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
+                          : 'bg-gray-800 border-gray-600 text-gray-500'
+                      }`}
+                    >
+                      3
+                    </div>
+                    <div className="text-center">
+                      <p
+                        className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${
+                          importStep >= 3 ? 'text-gray-200' : 'text-gray-500'
+                        }`}
+                      >
+                        Confirmar
+                      </p>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
 
+            <div>
+              {(() => {
+                if (importStep === 1) {
+                  return (
+                    <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3 sm:space-y-4">
+                      <div>
+                        <p className="text-sm font-semibold text-gray-200">
+                          Paso 1 — Selecciona el archivo
+                        </p>
+                        <p className="text-xs text-gray-500 mt-0.5">
+                          Elige el archivo <code className="px-1 rounded bg-gray-800 text-cyan-300 text-[10px]">.vault</code> generado por SecurePass.
+                        </p>
+                      </div>
+                      <div className="space-y-2">
+                        <button
+                          onClick={handleVaultFileSelect}
+                          className="w-full p-3 bg-gray-700 rounded-md border border-gray-600 hover:bg-gray-600 transition-colors text-left"
+                        >
+                          {selectedFileName || 'Seleccionar archivo .vault...'}
+                        </button>
+                        <input
+                          ref={vaultFileInputRef}
+                          type="file"
+                          accept=".vault,.json,.vault.json,application/json,application/octet-stream"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0] ?? null;
+                            if (f) {
+                              setSelectedFile(f);
+                              setSelectedFileName(f.name);
+                              setTimeout(() => void handleImportNext(), 140);
+                            } else {
+                              setSelectedFile(null);
+                              setSelectedFileName('');
+                            }
+                          }}
+                          className="hidden"
+                        />
+                      </div>
+                      {selectedFileName && (
+                        <div className="flex items-start gap-3 text-sm rounded-md border border-green-500/20 bg-green-500/5 px-3 py-2.5">
+                          <div className="text-green-400 text-lg leading-none mt-0.5">✓</div>
+                          <div className="min-w-0 flex-1">
+                            <p className="text-gray-100 font-medium">Archivo cargado</p>
+                            <p className="text-gray-500 truncate mt-0.5">{selectedFileName}</p>
+                          </div>
+                        </div>
+                      )}
+                      {!selectedFileName && (
+                        <p className="text-sm text-cyan-500 font-medium text-center pt-1">
+                          Selecciona un archivo .vault para continuar.
+                        </p>
+                      )}
+                    </div>
+                  );
+                }
+
+                if (importStep === 2) {
+                  return (
+                    <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3 sm:space-y-4">
+                      <div>
+                        <p className="text-sm font-semibold text-gray-200">
+                          Paso 2 — Patrón de desbloqueo del respaldo
+                        </p>
+                        <p className="text-xs text-gray-500 mt-0.5">
+                          Dibuja el patrón con el que se protegió este archivo cuando se creó.
+                        </p>
+                      </div>
+                      <div className="flex justify-center">
+                        <GesturePad
+                          onPatternComplete={(p) => {
+                            setImportPattern(p);
+                            setSuccess('Patrón capturado. Validando archivo...');
+                            setTimeout(() => void handleImportNext(), 160);
+                          }}
+                          minPoints={4}
+                          resetKey={importPatternReset}
+                        />
+                      </div>
+                      {importPattern && (
+                        <div className="space-y-2">
+                          <p className="text-center text-xs text-green-400">✓ Patrón introducido.</p>
+                          <div className="flex justify-center pt-1">
+                            <button
+                              onClick={() => {
+                                setImportPattern(null);
+                                setImportPatternReset((k) => k + 1);
+                                setSuccess('');
+                              }}
+                              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-gray-700/60 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-600/40"
+                            >
+                              ↺ Reiniciar patrón
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                      {!importPattern && (
+                        <p className="text-sm text-cyan-500 font-medium text-center pt-1">
+                          Dibuja el patrón del archivo para continuar.
+                        </p>
+                      )}
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3 sm:space-y-4">
+                    <div className="flex items-start justify-between gap-3 flex-wrap">
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-gray-200">
+                          Paso 3 — Confirma la restauración
+                        </p>
+                        <p className="text-xs text-gray-500 mt-0.5">
+                          Elige cómo integrar estas contraseñas en tu bóveda local.
+                        </p>
+                      </div>
+                      <span className="text-xs font-semibold text-gray-500">
+                        {previewImportedPasswords?.length ?? 0} contraseñas
+                      </span>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label
+                        className={`flex items-start gap-3 p-3 rounded-md border transition-colors cursor-pointer ${
+                          importMode === 'merge'
+                            ? 'border-cyan-500/60 bg-cyan-500/5'
+                            : 'border-gray-600 bg-gray-800/40 hover:border-gray-500'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          value="merge"
+                          checked={importMode === 'merge'}
+                          onChange={(e) => setImportMode(e.target.value as ImportMode)}
+                          className="mt-1 mr-1"
+                        />
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-gray-200">
+                            Agregar a las existentes
+                          </p>
+                          <p className="text-xs text-gray-500 mt-0.5">
+                            Fusiona las nuevas contraseñas con las actuales. Se actualizarán aquellas con el mismo sitio y usuario.
+                          </p>
+                        </div>
+                      </label>
+                      <label
+                        className={`flex items-start gap-3 p-3 rounded-md border transition-colors cursor-pointer ${
+                          importMode === 'overwrite'
+                            ? 'border-cyan-500/60 bg-cyan-500/5'
+                            : 'border-gray-600 bg-gray-800/40 hover:border-gray-500'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          value="overwrite"
+                          checked={importMode === 'overwrite'}
+                          onChange={(e) => setImportMode(e.target.value as ImportMode)}
+                          className="mt-1 mr-1"
+                        />
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-gray-200">Reemplazar todas</p>
+                          <p className="text-xs text-gray-500 mt-0.5">
+                            Elimina las contraseñas actuales y deja solo las del archivo. Esta acción no se puede deshacer.
+                          </p>
+                        </div>
+                      </label>
+                    </div>
+
+                    <div className="rounded-md border border-gray-700 bg-gray-800/40 p-3">
+                      <p className="text-xs font-semibold text-gray-400 mb-2 uppercase tracking-wider">
+                        Vista previa
+                      </p>
+                      <div className="max-h-[240px] overflow-y-auto space-y-2 pr-1">
+                        {previewImportedPasswords?.map((entry) => (
+                          <div
+                            key={entry.id}
+                            className="p-3 rounded-md bg-gray-800 border border-gray-700"
+                          >
+                            <p className="font-semibold text-cyan-400 truncate">{entry.site}</p>
+                            <p className="text-sm text-gray-300 truncate">{entry.username}</p>
+                            <p className="text-xs text-gray-500 mt-1 truncate">{entry.category}</p>
+                          </div>
+                        ))}
+                        {(!previewImportedPasswords || previewImportedPasswords.length === 0) && (
+                          <p className="text-sm text-gray-500 italic text-center py-4">
+                            No hay contraseñas para mostrar.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+
             {error && <p className="text-red-400 text-sm pl-1">{error}</p>}
-            {success && <p className="text-green-400 text-sm pl-1">{success}</p>}
+            {success && importStep !== 1 && (
+              <p className="text-green-400 text-sm pl-1">{success}</p>
+            )}
 
             <div className="flex justify-between gap-3 pt-2">
               <button
-                onClick={() => void changeMode('select')}
+                onClick={handleImportBack}
                 className="px-4 py-2 rounded-md bg-gray-600 hover:bg-gray-500 transition-colors min-w-[120px]"
               >
                 Atrás
               </button>
-              <button
-                onClick={() => void handleImport()}
-                disabled={!selectedFileName || !importPattern}
-                className="px-5 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold disabled:opacity-50 disabled:cursor-not-allowed min-w-[180px]"
-              >
-                Restaurar respaldo
-              </button>
+              {(() => {
+                const nextDisabled =
+                  (importStep === 1 && !selectedFile) ||
+                  (importStep === 2 && (!importPattern || importPattern.length < 4)) ||
+                  (importStep === 3 && (!previewImportedPasswords || previewImportedPasswords.length === 0));
+                return (
+                  <button
+                    onClick={() => void handleImportNext()}
+                    disabled={nextDisabled}
+                    className="px-5 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold disabled:opacity-50 disabled:cursor-not-allowed min-w-[200px]"
+                  >
+                    {importStep === 3 ? 'Restaurar respaldo' : 'Siguiente'}
+                  </button>
+                );
+              })()}
             </div>
           </div>
         )}
 
         {mode === 'shareQR' && (
-          <div className="space-y-5">
+          <div className="space-y-3.5 sm:space-y-5">
             <div className="space-y-1">
               <p className="text-gray-400 text-sm">
                 Transfiere contraseñas cifradas a otro dispositivo siguiendo este flujo guiado.
               </p>
             </div>
 
-            <div className="pt-1 pb-2">
+            <div className="pt-0.5 pb-1.5 sm:pt-1 sm:pb-2">
               <div className="max-w-[420px] mx-auto">
-                <div className="flex items-start justify-between px-1">
-                  <div className="flex flex-col items-center gap-2 flex-1">
+                <div className="flex items-start justify-between px-0.5 sm:px-1">
+                  <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
                     <div
-                      className={`relative z-10 w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold border-2 transition-colors ${
+                      className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${
                         shareQRStep > 1
                           ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
                           : shareQRStep === 1
@@ -2032,21 +2405,18 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
                     >
                       {shareQRStep > 1 ? '✓' : '1'}
                     </div>
-                    <div className="text-center space-y-0.5">
+                    <div className="text-center">
                       <p
-                        className={`text-[11px] font-semibold leading-tight ${
+                        className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${
                           shareQRStep >= 1 ? 'text-gray-200' : 'text-gray-500'
                         }`}
                       >
                         Seleccionar
                       </p>
-                      {shareQRStep > 1 && (
-                        <p className="text-[10px] text-cyan-400/90 leading-none">Completado</p>
-                      )}
                     </div>
                   </div>
 
-                  <div className="flex-1 flex items-center pt-4 mx-1">
+                  <div className="flex-1 flex items-center pt-3 sm:pt-4 mx-0.5 sm:mx-1">
                     <div
                       className={`h-0.5 w-full rounded-full transition-colors ${
                         shareQRStep > 1 ? 'bg-cyan-500' : 'bg-gray-700'
@@ -2054,9 +2424,9 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
                     />
                   </div>
 
-                  <div className="flex flex-col items-center gap-2 flex-1">
+                  <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
                     <div
-                      className={`relative z-10 w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold border-2 transition-colors ${
+                      className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${
                         shareQRStep > 2
                           ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
                           : shareQRStep === 2
@@ -2066,21 +2436,18 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
                     >
                       {shareQRStep > 2 ? '✓' : '2'}
                     </div>
-                    <div className="text-center space-y-0.5">
+                    <div className="text-center">
                       <p
-                        className={`text-[11px] font-semibold leading-tight ${
+                        className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${
                           shareQRStep >= 2 ? 'text-gray-200' : 'text-gray-500'
                         }`}
                       >
                         Patrón
                       </p>
-                      {shareQRStep === 2 && (
-                        <p className="text-[10px] text-cyan-400/90 leading-none">Activo</p>
-                      )}
                     </div>
                   </div>
 
-                  <div className="flex-1 flex items-center pt-4 mx-1">
+                  <div className="flex-1 flex items-center pt-3 sm:pt-4 mx-0.5 sm:mx-1">
                     <div
                       className={`h-0.5 w-full rounded-full transition-colors ${
                         shareQRStep > 2 ? 'bg-cyan-500' : 'bg-gray-700'
@@ -2088,9 +2455,9 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
                     />
                   </div>
 
-                  <div className="flex flex-col items-center gap-2 flex-1">
+                  <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
                     <div
-                      className={`relative z-10 w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold border-2 transition-colors ${
+                      className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${
                         shareQRStep >= 3
                           ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
                           : 'bg-gray-800 border-gray-600 text-gray-500'
@@ -2098,17 +2465,14 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
                     >
                       3
                     </div>
-                    <div className="text-center space-y-0.5">
+                    <div className="text-center">
                       <p
-                        className={`text-[11px] font-semibold leading-tight ${
+                        className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${
                           shareQRStep >= 3 ? 'text-gray-200' : 'text-gray-500'
                         }`}
                       >
                         QR
                       </p>
-                      {shareQRStep === 3 && (
-                        <p className="text-[10px] text-cyan-400/90 leading-none">Activo</p>
-                      )}
                     </div>
                   </div>
                 </div>
@@ -2120,7 +2484,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
               className="animate-in fade-in zoom-in-[99%] duration-200 ease-out"
             >
               {shareQRStep === 1 && (
-                <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4">
+                <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4">
                   <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
                     <div>
                       <p className="text-sm font-semibold text-gray-200">
@@ -2211,7 +2575,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
               )}
 
               {shareQRStep === 2 && (
-                <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4 space-y-3">
+                <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3">
                   <div>
                     <p className="text-sm font-semibold text-gray-200">
                       Paso 2 — Patrón de desbloqueo de este dispositivo
@@ -2251,7 +2615,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
               )}
 
               {shareQRStep === 3 && (
-                <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4 space-y-4">
+                <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3 sm:space-y-4">
                   <div className="flex items-center justify-between gap-3 flex-wrap">
                     <div>
                       <p className="text-sm font-semibold text-gray-200">
@@ -2423,16 +2787,16 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
         )}
 
         {mode === 'scanQR' && (
-          <div className="space-y-4">
+          <div className="space-y-3 sm:space-y-4">
             <p className="text-gray-400 text-sm">
               Recibe contraseñas desde otro dispositivo usando la cámara o una imagen QR. Si la transferencia usa varios códigos, escanéalos todos.
             </p>
 
             <div className="max-w-[420px] mx-auto">
-              <div className="flex items-start justify-between px-1">
-                <div className="flex flex-col items-center gap-2 flex-1">
+              <div className="flex items-start justify-between px-0.5 sm:px-1">
+                <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
                   <div
-                    className={`relative z-10 w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold border-2 transition-colors ${
+                    className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${
                       scanQRStep > 1
                         ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
                         : scanQRStep === 1
@@ -2442,21 +2806,18 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
                   >
                     {scanQRStep > 1 ? '✓' : '1'}
                   </div>
-                  <div className="text-center space-y-0.5">
+                  <div className="text-center">
                     <p
-                      className={`text-[11px] font-semibold leading-tight ${
+                      className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${
                         scanQRStep >= 1 ? 'text-gray-200' : 'text-gray-500'
                       }`}
                     >
                       Escanear
                     </p>
-                    {scanQRStep > 1 && (
-                      <p className="text-[10px] text-cyan-400/90 leading-none">Completado</p>
-                    )}
                   </div>
                 </div>
 
-                <div className="flex-1 flex items-center pt-4 mx-1">
+                <div className="flex-1 flex items-center pt-3 sm:pt-4 mx-0.5 sm:mx-1">
                   <div
                     className={`h-0.5 w-full rounded-full transition-colors ${
                       scanQRStep > 1 ? 'bg-cyan-500' : 'bg-gray-700'
@@ -2464,9 +2825,9 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
                   />
                 </div>
 
-                <div className="flex flex-col items-center gap-2 flex-1">
+                <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
                   <div
-                    className={`relative z-10 w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold border-2 transition-colors ${
+                    className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${
                       scanQRStep > 2
                         ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
                         : scanQRStep === 2
@@ -2476,21 +2837,18 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
                   >
                     {scanQRStep > 2 ? '✓' : '2'}
                   </div>
-                  <div className="text-center space-y-0.5">
+                  <div className="text-center">
                     <p
-                      className={`text-[11px] font-semibold leading-tight ${
+                      className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${
                         scanQRStep >= 2 ? 'text-gray-200' : 'text-gray-500'
                       }`}
                     >
                       Patrón
                     </p>
-                    {scanQRStep === 2 && (
-                      <p className="text-[10px] text-cyan-400/90 leading-none">Activo</p>
-                    )}
                   </div>
                 </div>
 
-                <div className="flex-1 flex items-center pt-4 mx-1">
+                <div className="flex-1 flex items-center pt-3 sm:pt-4 mx-0.5 sm:mx-1">
                   <div
                     className={`h-0.5 w-full rounded-full transition-colors ${
                       scanQRStep > 2 ? 'bg-cyan-500' : 'bg-gray-700'
@@ -2498,9 +2856,9 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
                   />
                 </div>
 
-                <div className="flex flex-col items-center gap-2 flex-1">
+                <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
                   <div
-                    className={`relative z-10 w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold border-2 transition-colors ${
+                    className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${
                       scanQRStep >= 3
                         ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
                         : 'bg-gray-800 border-gray-600 text-gray-500'
@@ -2508,17 +2866,14 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
                   >
                     3
                   </div>
-                  <div className="text-center space-y-0.5">
+                  <div className="text-center">
                     <p
-                      className={`text-[11px] font-semibold leading-tight ${
+                      className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${
                         scanQRStep >= 3 ? 'text-gray-200' : 'text-gray-500'
                       }`}
                     >
                       Confirmar
                     </p>
-                    {scanQRStep === 3 && (
-                      <p className="text-[10px] text-cyan-400/90 leading-none">Activo</p>
-                    )}
                   </div>
                 </div>
               </div>
@@ -2550,7 +2905,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
                     : 'Cargar imagen QR';
 
                   return (
-                    <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4 space-y-4">
+                    <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3 sm:space-y-4">
                       <div className="flex items-center justify-between flex-wrap gap-2">
                         <div>
                           <p className="text-sm font-semibold text-gray-200">
@@ -2679,7 +3034,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
                           <div className="relative w-full bg-black">
                             <div
                               id={QR_READER_ELEMENT_ID}
-                              className="w-full min-h-[260px] overflow-hidden bg-black"
+                              className="w-full min-h-[220px] sm:min-h-[260px] overflow-hidden bg-black"
                             />
                             <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
                               <div
@@ -2775,7 +3130,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
 
                 if (scanQRStep === 2) {
                   return (
-                    <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4 space-y-4">
+                    <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3 sm:space-y-4">
                       <div>
                         <p className="text-sm font-semibold text-gray-200">
                           Paso 2 — Patrón de desbloqueo
@@ -2827,7 +3182,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
 
                 return (
                   <div className="space-y-4">
-                    <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-4 space-y-3">
+                    <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3">
                       <div className="flex items-baseline justify-between gap-2 flex-wrap">
                         <div>
                           <p className="text-sm font-semibold text-gray-200">
@@ -2950,6 +3305,36 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
             </div>
           </div>
         )}
+    </>
+  );
+
+  if (resolvedVariant === 'fullscreen') {
+    return (
+      <div className={overlayOuter}>
+        <header className="sticky top-0 z-20 flex-shrink-0 bg-gray-800/90 backdrop-blur-sm border-b border-gray-700/60 px-2.5 sm:px-5 pt-safe-top pb-2 sm:py-3">
+          <div className="mx-auto w-full max-w-4xl">
+            <TitleHeader />
+          </div>
+        </header>
+        <div
+          ref={scrollContainerRef}
+          className="flex-1 min-h-0 overflow-y-auto px-2.5 sm:px-5 py-2.5 sm:py-4 pb-safe-bottom"
+        >
+          <div className="mx-auto w-full max-w-4xl">
+            <div className={innerBody}>{contentModes}</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={overlayOuter}>
+      <div ref={scrollContainerRef} className={innerBody}>
+        <div className="mb-6">
+          <TitleHeader showCloseButton={false} />
+        </div>
+        {contentModes}
       </div>
     </div>
   );

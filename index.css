@@ -66,4 +66,51 @@
 
 .animate-qr-reticle-pulse {
   animation: qr-reticle-pulse 2s infinite ease-in-out;
-} 
+}
+
+/* --- Mobile safe-area insets (iOS notch / Android nav bar) -------------- */
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Padding inferior extra para que el último contenido (botones Atrás/Sig)
+   nunca quede oculto por la barra gestual / botones de Android.
+   Reforzado con 2rem extra (~32px) para asegurar margen suficiente. */
+.pb-safe-bottom {
+  padding-bottom: calc(var(--safe-bottom) + 2rem);
+}
+
+/* Asegura que el header sticky nunca se solape con el notch del móvil */
+.pt-safe-top {
+  padding-top: calc(var(--safe-top) + 0.5rem);
+}
+
+/* Asegura que al hacer scroll programático / anchor links
+   el contenido no quede oculto tras el header sticky + notch */
+html,
+body,
+#root {
+  scroll-padding-top: calc(var(--safe-top) + 60px);
+  scroll-padding-bottom: calc(var(--safe-bottom) + 32px);
+}
+
+/* ==========================================================================
+   Hide html5-qrcode default reticle overlay
+   (avoid dual-reticle collision against our premium cyan animated one).
+   These IDs are injected internally by html5-qrcode 2.3.x inside
+   #securepass-qr-reader; scoping to our container ID prevents leaking.
+   ========================================================================== */
+#securepass-qr-reader #qr-shaded-region,
+#securepass-qr-reader #qr-box-limit {
+  display: none !important;
+  visibility: hidden !important;
+}
+
+/* Also hide the default qr-overlay (border/scan line) in case it is drawn under
+   an older html5-qrcode build with a slightly different DOM naming */
+#securepass-qr-reader [id^="qr-overlay"],
+#securepass-qr-reader [id*="qr-region"] {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
