@@ -78,7 +78,9 @@ const GesturePad: React.FC<GesturePadProps> = ({
   };
 
   const handleInteractionStart = (e: React.MouseEvent | React.TouchEvent) => {
-    e.preventDefault();
+    if ('cancelable' in e && e.cancelable) {
+      e.preventDefault();
+    }
     setIsDrawing(true);
     setErrorFlash(false);
     const index = getDotIndexFromEvent(e);
@@ -89,7 +91,9 @@ const GesturePad: React.FC<GesturePadProps> = ({
 
   const handleInteractionMove = (e: React.MouseEvent | React.TouchEvent) => {
     if (!isDrawing) return;
-    e.preventDefault();
+    if ('cancelable' in e && e.cancelable) {
+      e.preventDefault();
+    }
     const touch = 'touches' in e ? e.touches[0] : e;
     if (!touch || !gridRef.current) return;
 
@@ -163,11 +167,10 @@ const GesturePad: React.FC<GesturePadProps> = ({
             className={`w-10 h-10 rounded-full bg-gray-600/70 flex items-center justify-center ring-1 ring-gray-500/40 shadow-inner ${dotClassName}`}
           >
             <div
-              className={`w-5 h-5 rounded-full transition-all duration-150 ${
-                path.includes(i)
+              className={`w-5 h-5 rounded-full transition-all duration-150 ${path.includes(i)
                   ? `${dotActiveClass} scale-110 shadow-lg`
                   : 'bg-gray-600'
-              }`}
+                }`}
             />
           </div>
         ))}
@@ -194,9 +197,8 @@ const GesturePad: React.FC<GesturePadProps> = ({
         </svg>
       </div>
       <p
-        className={`mt-2 text-xs transition-opacity duration-200 ${
-          path.length > 0 && path.length < minPoints ? 'text-red-400 opacity-100' : 'text-gray-500 opacity-70'
-        }`}
+        className={`mt-2 text-xs transition-opacity duration-200 ${path.length > 0 && path.length < minPoints ? 'text-red-400 opacity-100' : 'text-gray-500 opacity-70'
+          }`}
       >
         {path.length > 0 && path.length < minPoints
           ? `Conecta al menos ${minPoints} puntos.`

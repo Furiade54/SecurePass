@@ -926,7 +926,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
       setScanSource(source);
 
       let currentTransferId = activeTransferId;
-      let updatedChunks = { ...receivedChunks };
+      const updatedChunks = { ...receivedChunks };
 
       if (!currentTransferId) {
         currentTransferId = v3.transferId;
@@ -1376,25 +1376,20 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
             navigator.mediaDevices &&
             typeof navigator.mediaDevices.getUserMedia === 'function'
           ) {
-            // eslint-disable-next-line no-console
             console.log('[camera-diagnostic] solicitando permiso getUserMedia({video:true}) DIRECTO …');
             const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-            // eslint-disable-next-line no-console
             console.log('[camera-diagnostic] getUserMedia OK → tracks=', stream.getTracks());
             stream.getTracks().forEach((track) => {
-              // eslint-disable-next-line no-console
               console.log('[camera-diagnostic]   stop track:', track.kind, track.label, track.readyState);
               track.stop();
             });
           } else {
-            // eslint-disable-next-line no-console
             console.error(
               '[camera-diagnostic] navigator.mediaDevices.getUserMedia NO EXISTE. Seguridad? HTTP? SecureContext=false? SecureContext=',
               typeof window !== 'undefined' ? window.isSecureContext : 'N/A'
             );
           }
         } catch (err) {
-          // eslint-disable-next-line no-console
           console.error('[camera-diagnostic] getUserMedia DIRECTO falló:', err);
         }
 
@@ -1407,7 +1402,6 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
 
         // 🧪 Diagnóstico del elemento del visor
         const qrElement = document.getElementById(QR_READER_ELEMENT_ID);
-        // eslint-disable-next-line no-console
         console.log(
           '[camera-diagnostic] DOM elemento visor QR:',
           qrElement
@@ -1418,7 +1412,6 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
         );
 
         if (!qrElement || qrElement.offsetWidth === 0 || qrElement.offsetHeight === 0) {
-          // eslint-disable-next-line no-console
           console.warn(
             '[camera-diagnostic] el visor QR no está listo. Cancelando scanner.start para evitar fallo html5-qrcode.'
           );
@@ -1440,7 +1433,6 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
           label: string,
           timeoutMs = 4000
         ): Promise<void> => {
-          // eslint-disable-next-line no-console
           console.log(`[camera-diagnostic] scanner.start() "${label}" → config=`, config);
 
           // 🛟 Stream provisional NUESTRO (antes que html5-qrcode haga el suyo)
@@ -1451,18 +1443,20 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
               typeof navigator !== 'undefined' &&
               navigator.mediaDevices?.getUserMedia
             ) {
-              streamBefore = await navigator.mediaDevices.getUserMedia(
-                config as MediaStreamConstraints
-              );
+              const videoConstraints =
+                Object.keys(config).length > 0
+                  ? (config as MediaTrackConstraints)
+                  : true;
+              streamBefore = await navigator.mediaDevices.getUserMedia({
+                video: videoConstraints
+              });
               streamBefore.getTracks().forEach((t) => t.stop());
               streamBefore = null;
-              // eslint-disable-next-line no-console
               console.log(
                 `[camera-diagnostic]   (our own test-call passed → hardware libre)`
               );
             }
           } catch (preErr) {
-            // eslint-disable-next-line no-console
             console.warn(
               `[camera-diagnostic]   nuestra llamada previa falló → probablemente la constraint no se pueda pedir (OK, html5-qrcode también lo hará).`,
               preErr
@@ -1519,7 +1513,6 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
               started = 'deviceId';
             } catch (deviceErr) {
               const e2 = deviceErr as { name?: string; constraintName?: string };
-              // eslint-disable-next-line no-console
               console.warn(
                 `[camera-diagnostic] scanner.start deviceId="${selectedCameraId}" falló → name=${e2.name}. Volviendo a estrategia por defecto.`
               );
@@ -1533,7 +1526,6 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
               started = 'environment';
             } catch (startErr) {
               const err = startErr as { name?: string; message?: string; constraintName?: string };
-              // eslint-disable-next-line no-console
               console.warn(
                 `[camera-diagnostic] scanner.start facingMode=environment FALLÓ → name=${err.name}  constraint=${
                   (err as unknown as { constraintName?: string }).constraintName ?? 'N/A'
@@ -1553,14 +1545,12 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
                 killProvisionalStream();
                 try {
                   const devs = await navigator.mediaDevices?.enumerateDevices?.();
-                  // eslint-disable-next-line no-console
                   console.debug(
                     `[camera-diagnostic] enumerateDevices() antes del retry any-camera →`,
                     devs
                   );
                 } catch { /* ignore */ }
 
-                // eslint-disable-next-line no-console
                 console.log('[camera-diagnostic] → reintento scanner.start SIN restricciones de facingMode');
 
                 await tryStartWithTimeout({}, 'any-camera', 5000);
@@ -1578,7 +1568,6 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
           throw new Error('No se pudo iniciar ninguna estrategia de cámara (deviceId/environment/any).');
         }
 
-        // eslint-disable-next-line no-console
         console.log(`[camera-diagnostic] ✅ scanner.start OK usando modo "${started}"`);
         isScannerRunningRef.current = true;
         setSuccess('Apunta la cámara al QR para continuar con la importación.');
@@ -1598,7 +1587,6 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
                 label: d.label || `Cámara ${i + 1}`
               }))
             );
-            // eslint-disable-next-line no-console
             console.log(
               `[camera-diagnostic] Cámaras detectadas: ${videoInputs.length}`,
               videoInputs.map((d, i) => d.label || `Cámara ${i + 1}`)
@@ -1632,7 +1620,6 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
             } catch { /* ignore */ }
           }
           setHasTorch(torchSupported);
-          // eslint-disable-next-line no-console
           console.log(
             `[camera-diagnostic] Soporte de linterna: ${torchSupported ? 'SÍ' : 'NO'} (track detectado=${!!track})`
           );
@@ -1643,7 +1630,6 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
       } catch (err) {
         killProvisionalStream();
         const e = err as { name?: string; message?: string; constraintName?: string };
-        // eslint-disable-next-line no-console
         console.error('[camera-diagnostic] fallo FINAL scanner.start html5-qrcode:', e);
         qrScannerRef.current = null;
         isScannerRunningRef.current = false;
@@ -1685,6 +1671,12 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
       void stopQRScanner();
     };
   }, [handleParsedQRPayload, isOpen, mode, scanSource, scannerRestartKey, selectedCameraId, stopQRScanner]);
+
+  const handleDecryptScannedQRRef = useRef(handleDecryptScannedQR);
+  handleDecryptScannedQRRef.current = handleDecryptScannedQR;
+
+  const handleGenerateQRRef = useRef(handleGenerateQR);
+  handleGenerateQRRef.current = handleGenerateQR;
 
   useEffect(() => {
     if (!isOpen || mode !== 'scanQR') {
@@ -1736,7 +1728,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
       const t = setTimeout(async () => {
         if (scanQRAutoDecryptGuardRef.current === guardKey) return;
         scanQRAutoDecryptGuardRef.current = guardKey;
-        const ok = await handleDecryptScannedQR();
+        const ok = await handleDecryptScannedQRRef.current();
         if (ok) {
           setScanQRStep(3);
           setScanQRAnimKey((k) => k + 1);
@@ -1748,7 +1740,6 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
     }
   }, [
     activeTransferId,
-    handleDecryptScannedQR,
     isOpen,
     mode,
     pendingQRPayload,
@@ -1779,7 +1770,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
     const t = setTimeout(async () => {
       if (shareQRAutoGenerateGuardRef.current === guardKey) return;
       shareQRAutoGenerateGuardRef.current = guardKey;
-      const ok = await handleGenerateQR();
+      const ok = await handleGenerateQRRef.current();
       if (ok) {
         setShareQRStep(3);
         setError('');
@@ -1789,7 +1780,6 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
     return () => clearTimeout(t);
   }, [
     generatedQRChunks.length,
-    handleGenerateQR,
     isOpen,
     mode,
     passwords.length,
