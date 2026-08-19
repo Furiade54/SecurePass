@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import QRCode from 'react-qr-code';
 import { Html5Qrcode } from 'html5-qrcode';
 import jsQR from 'jsqr';
@@ -36,6 +36,10 @@ interface ImportExportModalProps {
    * Ej: abrir directamente en 'scanQR' saltándose el selector.
    */
   initialMode?: Mode | null;
+  /**
+   * IDs de contraseñas preseleccionadas al abrir en modo shareQR.
+   */
+  initialSelectedPasswordIds?: string[];
 }
 
 type Mode = 'select' | 'export' | 'import' | 'shareQR' | 'scanQR';
@@ -384,12 +388,12 @@ const decodeQrFromFileRobust = async (
   const note =
     firstHtml || firstJs
       ? ` (html5-qr: ${serializeUnknownError(firstHtml || '')} · jsQR: ${serializeUnknownError(
-          firstJs || ''
-        )})`
+        firstJs || ''
+      )})`
       : '';
   throw new Error(
     'Ningun decoder pudo leer el QR. Asegurate de que el codigo tenga borde blanco, este enfocado y no este cortado.' +
-      note
+    note
   );
 };
 
@@ -409,7 +413,8 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
   onExportSuccess,
   passwords,
   variant = 'auto',
-  initialMode = null
+  initialMode = null,
+  initialSelectedPasswordIds = []
 }) => {
   const [mode, setMode] = useState<Mode>('select');
   const [backupPattern, setBackupPattern] = useState<number[] | null>(null);
@@ -422,6 +427,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
   const [selectedFileName, setSelectedFileName] = useState('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [selectedPasswordIds, setSelectedPasswordIds] = useState<string[]>([]);
+  const [showOnlySelected, setShowOnlySelected] = useState(false);
   const [qrSharePattern, setQrSharePattern] = useState<number[] | null>(null);
   const [qrSharePatternReset, setQrSharePatternReset] = useState(0);
   const [shareQRStep, setShareQRStep] = useState<1 | 2 | 3>(1);
@@ -474,7 +480,13 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
     } else {
       setMode('select');
     }
-  }, [isOpen, initialMode]);
+    if (initialSelectedPasswordIds && initialSelectedPasswordIds.length > 0) {
+      setSelectedPasswordIds(initialSelectedPasswordIds);
+      setShowOnlySelected(true);
+    } else {
+      setShowOnlySelected(false);
+    }
+  }, [isOpen, initialMode, initialSelectedPasswordIds]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -571,6 +583,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
     setImportMode(lastImportMode);
     setSelectedFileName('');
     setSelectedPasswordIds([]);
+    setShowOnlySelected(false);
     setQrSharePattern(null);
     setQrSharePatternReset((k) => k + 1);
     setShareQRStep(1);
@@ -623,6 +636,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
 
     if (nextMode !== 'shareQR') {
       setSelectedPasswordIds([]);
+      setShowOnlySelected(false);
       setQrSharePattern(null);
       setQrSharePatternReset((k) => k + 1);
       setShareQRStep(1);
@@ -786,8 +800,8 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
         if (payloadSize > MAX_QR_PAYLOAD_BYTES) {
           throw new Error(
             'Error interno al fragmentar el QR (fragmento ' +
-              (idx + 1) +
-              ' excede el límite). Reduce ligeramente la selección y reinténtalo.'
+            (idx + 1) +
+            ' excede el límite). Reduce ligeramente la selección y reinténtalo.'
           );
         }
         qrStrings.push(qrString);
@@ -991,7 +1005,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
         activeTransferId &&
         receivedChunks[activeTransferId] &&
         Object.keys(receivedChunks[activeTransferId].chunks).length ===
-          receivedChunks[activeTransferId].totalChunks;
+        receivedChunks[activeTransferId].totalChunks;
       if (!transferReady) {
         setError('Primero debes escanear TODOS los códigos QR de la transferencia.');
         return false;
@@ -1118,7 +1132,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
     const readyMulti =
       multi &&
       Object.keys(receivedChunks[activeTransferId].chunks).length ===
-        receivedChunks[activeTransferId].totalChunks;
+      receivedChunks[activeTransferId].totalChunks;
     const transferReady = readySingle || readyMulti;
 
     if (scanQRStep === 1) {
@@ -1127,8 +1141,8 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
         const receivedQRs = multi
           ? Object.keys(receivedChunks[activeTransferId!].chunks).length
           : pendingQRPayload
-          ? 1
-          : 0;
+            ? 1
+            : 0;
         setError(
           `Faltan QRs por leer: tienes ${receivedQRs} de ${totalQRs}. Completa la lectura antes de avanzar.`
         );
@@ -1342,6 +1356,20 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
     );
   };
 
+  const displayedSharePasswords = useMemo(() => {
+    if (showOnlySelected && selectedPasswordIds.length > 0) {
+      const only = passwords.filter((p) => selectedPasswordIds.includes(p.id));
+      if (only.length > 0) return only;
+    }
+    return [...passwords].sort((a, b) => {
+      const aSel = selectedPasswordIds.includes(a.id);
+      const bSel = selectedPasswordIds.includes(b.id);
+      if (aSel && !bSel) return -1;
+      if (!aSel && bSel) return 1;
+      return 0;
+    });
+  }, [passwords, showOnlySelected, selectedPasswordIds]);
+
   useEffect(() => {
     if (!isOpen || mode !== 'scanQR' || scanSource !== 'camera') {
       return;
@@ -1405,9 +1433,8 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
         console.log(
           '[camera-diagnostic] DOM elemento visor QR:',
           qrElement
-            ? `OK — ${qrElement.offsetWidth}×${qrElement.offsetHeight}, visible=${
-                qrElement.offsetWidth > 0 && qrElement.offsetHeight > 0
-              }`
+            ? `OK — ${qrElement.offsetWidth}×${qrElement.offsetHeight}, visible=${qrElement.offsetWidth > 0 && qrElement.offsetHeight > 0
+            }`
             : 'NO EXISTE AÚN EN EL DOM'
         );
 
@@ -1482,7 +1509,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
               isScanLockedRef.current = true;
               await handleParsedQRPayload(decodedText, 'camera');
             },
-            () => {}
+            () => { }
           );
 
           const timeoutPromise = new Promise<never>((_resolve, reject) => {
@@ -1527,8 +1554,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
             } catch (startErr) {
               const err = startErr as { name?: string; message?: string; constraintName?: string };
               console.warn(
-                `[camera-diagnostic] scanner.start facingMode=environment FALLÓ → name=${err.name}  constraint=${
-                  (err as unknown as { constraintName?: string }).constraintName ?? 'N/A'
+                `[camera-diagnostic] scanner.start facingMode=environment FALLÓ → name=${err.name}  constraint=${(err as unknown as { constraintName?: string }).constraintName ?? 'N/A'
                 }  message=${err.message ?? String(startErr)}`
               );
 
@@ -1688,7 +1714,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
     const readyMulti =
       multi &&
       Object.keys(receivedChunks[activeTransferId].chunks).length ===
-        receivedChunks[activeTransferId].totalChunks;
+      receivedChunks[activeTransferId].totalChunks;
     const transferReady = readySingle || readyMulti;
 
     if (scanQRStep === 1) {
@@ -1710,15 +1736,13 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
         JSON.stringify(qrImportPattern) +
         '|' +
         (pendingQRPayload?.version === '3.0'
-          ? `${(pendingQRPayload as QRSharePayloadV3).transferId}-${
-              (pendingQRPayload as QRSharePayloadV3).chunkIndex
-            }`
+          ? `${(pendingQRPayload as QRSharePayloadV3).transferId}-${(pendingQRPayload as QRSharePayloadV3).chunkIndex
+          }`
           : String(pendingQRPayload?.timestamp || '')) +
         '|' +
         (multi
-          ? `${activeTransferId}-${
-              receivedChunks[activeTransferId!].totalChunks
-            }-${Object.keys(receivedChunks[activeTransferId!].chunks).length}`
+          ? `${activeTransferId}-${receivedChunks[activeTransferId!].totalChunks
+          }-${Object.keys(receivedChunks[activeTransferId!].chunks).length}`
           : 'single') +
         '|' +
         scanQRAnimKey;
@@ -1804,12 +1828,12 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
     mode === 'select'
       ? 'Gestionar bóveda'
       : mode === 'export'
-      ? 'Crear respaldo'
-      : mode === 'import'
-      ? 'Restaurar respaldo'
-      : mode === 'shareQR'
-      ? 'Enviar por QR'
-      : 'Recibir por QR';
+        ? 'Crear respaldo'
+        : mode === 'import'
+          ? 'Restaurar respaldo'
+          : mode === 'shareQR'
+            ? 'Enviar por QR'
+            : 'Recibir por QR';
 
   const TitleHeader: React.FC<{ showCloseButton?: boolean }> = ({ showCloseButton = true }) => (
     <div className="flex items-center justify-between gap-3 flex-shrink-0">
@@ -1839,441 +1863,1363 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
   const innerBody =
     resolvedVariant === 'fullscreen'
       ? `space-y-3 sm:space-y-4`
-      : `bg-gray-800 rounded-lg shadow-xl p-6 w-full text-gray-200 animate-fade-in-up overflow-y-auto ${
-          isQrFlow ? 'max-w-4xl max-h-[90vh]' : 'max-w-md max-h-[90vh]'
-        }`;
+      : `bg-gray-800 rounded-lg shadow-xl p-6 w-full text-gray-200 animate-fade-in-up overflow-y-auto ${isQrFlow ? 'max-w-4xl max-h-[90vh]' : 'max-w-md max-h-[90vh]'
+      }`;
 
   const contentModes = (
     <>
-        {mode === 'select' && (
-          <div className="space-y-5 sm:space-y-6">
-            <p className="text-gray-400">
-              Crea o restaura un respaldo, o transfiere contraseñas entre dispositivos.
-            </p>
+      {mode === 'select' && (
+        <div className="space-y-5 sm:space-y-6">
+          <p className="text-gray-400">
+            Crea o restaura un respaldo, o transfiere contraseñas entre dispositivos.
+          </p>
 
-            {/* ===== SECCIÓN 1 — RESPALDOS JSON ===== */}
-            <div className="space-y-2.5">
-              <div className="flex items-center gap-2 flex-wrap">
-                <p className="text-xs font-bold uppercase tracking-wider text-gray-500">
-                  Respaldos
-                </p>
-                <span className="inline-flex items-center gap-1 text-[10px] sm:text-[11px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-md bg-indigo-500/10 text-indigo-300 border border-indigo-500/30">
-                  {'{ }'}  JSON · Archivo
-                </span>
-              </div>
-              <p className="text-xs text-gray-500 -mt-1">
-                Copia de seguridad completa en archivo para guardar en la nube o PC.
+          {/* ===== SECCIÓN 1 — RESPALDOS JSON ===== */}
+          <div className="space-y-2.5">
+            <div className="flex items-center gap-2 flex-wrap">
+              <p className="text-xs font-bold uppercase tracking-wider text-gray-500">
+                Respaldos
               </p>
-              <div className="space-y-2 pt-1">
-                <button
-                  onClick={() => void changeMode('export')}
-                  className="group w-full text-left px-3 sm:px-4 py-2.5 sm:py-3 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="flex items-center min-w-0">
-                      <span className="hidden sm:inline w-7 h-7 mr-3 inline-flex items-center justify-center rounded-md bg-cyan-500/20 text-cyan-100 border border-cyan-400/30 text-xs font-bold">
-                        ⤓
-                      </span>
-                      Crear respaldo
-                    </span>
-                    <span className="hidden sm:inline-flex items-center text-[11px] text-cyan-100/80 font-normal">
-                      Exporta JSON
-                    </span>
-                  </div>
-                </button>
-                <button
-                  onClick={() => void changeMode('import')}
-                  className="group w-full text-left px-3 sm:px-4 py-2.5 sm:py-3 rounded-md bg-gray-700 hover:bg-gray-600 transition-colors font-semibold border border-gray-600"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="flex items-center min-w-0">
-                      <span className="hidden sm:inline w-7 h-7 mr-3 inline-flex items-center justify-center rounded-md bg-gray-600/70 text-gray-200 border border-gray-500/40 text-xs font-bold">
-                        ⤒
-                      </span>
-                      Restaurar respaldo
-                    </span>
-                    <span className="hidden sm:inline-flex items-center text-[11px] text-gray-300/80 font-normal">
-                      Importa JSON
-                    </span>
-                  </div>
-                </button>
-              </div>
+              <span className="inline-flex items-center gap-1 text-[10px] sm:text-[11px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-md bg-indigo-500/10 text-indigo-300 border border-indigo-500/30">
+                {'{ }'}  JSON · Archivo
+              </span>
             </div>
-
-            {/* ===== SECCIÓN 2 — TRANSFERENCIA QR ===== */}
-            <div className="space-y-2.5 pt-1">
-              <div className="flex items-center gap-2 flex-wrap">
-                <p className="text-xs font-bold uppercase tracking-wider text-gray-500">
-                  Transferencia entre dispositivos
-                </p>
-                <span className="inline-flex items-center gap-1 text-[10px] sm:text-[11px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-md bg-cyan-500/10 text-cyan-300 border border-cyan-500/30">
-                  <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 inline-block -mt-[1px]" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                    <path fillRule="evenodd" d="M3 4a1 1 0 011-1h3a1 1 0 011 1v3a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm2 3a1 1 0 011-1zm7 0a1 1 0 01.707.293L7.707 6.293a1 1 0 11-1.414-1.414l3-3A1 1 0 0110 3zm-1 7a1 1 0 011-1h2v2H10a1 1 0 110-2zm-3 6a1 1 0 011-1h3a1 1 0 011 1v3a1 1 0 01-1 1H7a1 1 0 01-1-1v-3zm6-6a1 1 0 011-1h3a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-3zM17 10a1 1 0 011-1h.001 2.293l2.293-2.293a1 1 0 011.414 1.414l-3 3A1 1 0 0117 10z" clipRule="evenodd" />
-                  </svg>
-                  Escaneo QR · Cámara
-                </span>
-              </div>
-              <p className="text-xs text-gray-500 -mt-1">
-                De móvil a móvil usando la cámara. Ideal para pasar contraseñas sin salir de la app.
-              </p>
-              <div className="space-y-2 pt-1">
-                <button
-                  onClick={() => void changeMode('shareQR')}
-                  className="group w-full text-left px-3 sm:px-4 py-2.5 sm:py-3 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="flex items-center min-w-0">
-                      <span className="hidden sm:inline w-7 h-7 mr-3 inline-flex items-center justify-center rounded-md bg-cyan-500/20 text-cyan-100 border border-cyan-400/30 text-sm">
-                        →
-                      </span>
-                      Enviar por QR
-                    </span>
-                    <span className="hidden sm:inline-flex items-center text-[11px] text-cyan-100/80 font-normal">
-                      Genera códigos QR
-                    </span>
-                  </div>
-                </button>
-                <button
-                  onClick={() => void changeMode('scanQR')}
-                  className="group w-full text-left px-3 sm:px-4 py-2.5 sm:py-3 rounded-md bg-gray-700 hover:bg-gray-600 transition-colors font-semibold border border-gray-600"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="flex items-center min-w-0">
-                      <span className="hidden sm:inline w-7 h-7 mr-3 inline-flex items-center justify-center rounded-md bg-gray-600/70 text-gray-200 border border-gray-500/40 text-sm">
-                        ←
-                      </span>
-                      Recibir por QR
-                    </span>
-                    <span className="hidden sm:inline-flex items-center text-[11px] text-gray-300/80 font-normal">
-                      Usa la cámara
-                    </span>
-                  </div>
-                </button>
-              </div>
-            </div>
-
-            <button
-              onClick={() => void handleClose()}
-              className="w-full px-4 py-2 rounded-md bg-gray-700 hover:bg-gray-600 transition-colors mt-1"
-            >
-              Cancelar
-            </button>
-          </div>
-        )}
-
-        {mode === 'export' && (
-          <div className="space-y-4">
-            <p className="text-gray-400">
-              Crea una copia encriptada de toda tu bóveda. Tendrás que confirmar el mismo patrón dos veces.
+            <p className="text-xs text-gray-500 -mt-1">
+              Copia de seguridad completa en archivo para guardar en la nube o PC.
             </p>
-
-            <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-baseline gap-2">
-                  <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-cyan-500/10 text-cyan-400 text-xs font-bold border border-cyan-500/30">
-                    {backupConfirmStep ? 2 : 1}
+            <div className="space-y-2 pt-1">
+              <button
+                onClick={() => void changeMode('export')}
+                className="group w-full text-left px-3 sm:px-4 py-2.5 sm:py-3 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <span className="flex items-center min-w-0">
+                    <span className="hidden sm:inline w-7 h-7 mr-3 inline-flex items-center justify-center rounded-md bg-cyan-500/20 text-cyan-100 border border-cyan-400/30 text-xs font-bold">
+                      ⤓
+                    </span>
+                    Crear respaldo
                   </span>
-                  <p className="text-sm font-semibold text-gray-200">
-                    {backupConfirmStep ? 'Confirma el patrón' : 'Dibuja un patrón de protección'}
-                  </p>
+                  <span className="hidden sm:inline-flex items-center text-[11px] text-cyan-100/80 font-normal">
+                    Exporta JSON
+                  </span>
                 </div>
-                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                  Paso {backupConfirmStep ? 2 : 1} de 2
-                </span>
-              </div>
-              <div className="h-1.5 w-full bg-gray-700 rounded-full overflow-hidden">
-                <div
-                  className={`h-full transition-all duration-300 ${backupConfirmStep ? 'bg-cyan-500 w-full' : 'bg-cyan-500/70 w-1/2'}`}
-                />
-              </div>
-              <p className="text-xs text-gray-500">
-                {backupConfirmStep
-                  ? 'Dibuja exactamente el mismo patrón para confirmar.'
-                  : 'Conecta al menos 4 puntos. Deberás recordarlo para restaurar este respaldo.'}
+              </button>
+              <button
+                onClick={() => void changeMode('import')}
+                className="group w-full text-left px-3 sm:px-4 py-2.5 sm:py-3 rounded-md bg-gray-700 hover:bg-gray-600 transition-colors font-semibold border border-gray-600"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <span className="flex items-center min-w-0">
+                    <span className="hidden sm:inline w-7 h-7 mr-3 inline-flex items-center justify-center rounded-md bg-gray-600/70 text-gray-200 border border-gray-500/40 text-xs font-bold">
+                      ⤒
+                    </span>
+                    Restaurar respaldo
+                  </span>
+                  <span className="hidden sm:inline-flex items-center text-[11px] text-gray-300/80 font-normal">
+                    Importa JSON
+                  </span>
+                </div>
+              </button>
+            </div>
+          </div>
+
+          {/* ===== SECCIÓN 2 — TRANSFERENCIA QR ===== */}
+          <div className="space-y-2.5 pt-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <p className="text-xs font-bold uppercase tracking-wider text-gray-500">
+                Transferencia entre dispositivos
               </p>
-              <div className="flex justify-center">
-                <GesturePad
-                  onPatternComplete={handleExportBackupPattern}
-                  minPoints={4}
-                  showError={!!patternError}
-                  resetKey={backupPatternReset}
-                />
-              </div>
-              <div className="flex flex-wrap gap-2 justify-center items-center min-h-[20px]">
-                {backupPattern && !backupConfirmStep && (
-                  <p className="text-xs text-green-400">✓ Patrón definido. Confírmalo dibujándolo de nuevo.</p>
-                )}
-                {backupConfirmStep && !backupConfirmPattern && (
-                  <p className="text-xs text-cyan-400">Ya casi terminas: dibuja el mismo patrón una segunda vez.</p>
-                )}
-                {patternError && (
-                  <p className="text-xs text-red-400">{patternError}</p>
-                )}
-              </div>
-              {(backupPattern || backupConfirmPattern) && (
-                <div className="flex justify-center pt-1">
-                  <button
-                    onClick={() => {
-                      setBackupPattern(null);
-                      setBackupConfirmPattern(null);
-                      setBackupConfirmStep(false);
-                      setBackupPatternReset((k) => k + 1);
-                      setPatternError('');
-                      setSuccess('');
-                    }}
-                    className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-gray-700/60 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-600/40"
-                  >
-                    ↺ Reiniciar patrones
-                  </button>
+              <span className="inline-flex items-center gap-1 text-[10px] sm:text-[11px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-md bg-cyan-500/10 text-cyan-300 border border-cyan-500/30">
+                <svg xmlns="http://www.w3.org/2000/svg" className="w-3 h-3 inline-block -mt-[1px]" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                  <path fillRule="evenodd" d="M3 4a1 1 0 011-1h3a1 1 0 011 1v3a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm2 3a1 1 0 011-1zm7 0a1 1 0 01.707.293L7.707 6.293a1 1 0 11-1.414-1.414l3-3A1 1 0 0110 3zm-1 7a1 1 0 011-1h2v2H10a1 1 0 110-2zm-3 6a1 1 0 011-1h3a1 1 0 011 1v3a1 1 0 01-1 1H7a1 1 0 01-1-1v-3zm6-6a1 1 0 011-1h3a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-3zM17 10a1 1 0 011-1h.001 2.293l2.293-2.293a1 1 0 011.414 1.414l-3 3A1 1 0 0117 10z" clipRule="evenodd" />
+                </svg>
+                Escaneo QR · Cámara
+              </span>
+            </div>
+            <p className="text-xs text-gray-500 -mt-1">
+              De móvil a móvil usando la cámara. Ideal para pasar contraseñas sin salir de la app.
+            </p>
+            <div className="space-y-2 pt-1">
+              <button
+                onClick={() => void changeMode('shareQR')}
+                className="group w-full text-left px-3 sm:px-4 py-2.5 sm:py-3 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <span className="flex items-center min-w-0">
+                    <span className="hidden sm:inline w-7 h-7 mr-3 inline-flex items-center justify-center rounded-md bg-cyan-500/20 text-cyan-100 border border-cyan-400/30 text-sm">
+                      →
+                    </span>
+                    Enviar por QR
+                  </span>
+                  <span className="hidden sm:inline-flex items-center text-[11px] text-cyan-100/80 font-normal">
+                    Genera códigos QR
+                  </span>
                 </div>
+              </button>
+              <button
+                onClick={() => void changeMode('scanQR')}
+                className="group w-full text-left px-3 sm:px-4 py-2.5 sm:py-3 rounded-md bg-gray-700 hover:bg-gray-600 transition-colors font-semibold border border-gray-600"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <span className="flex items-center min-w-0">
+                    <span className="hidden sm:inline w-7 h-7 mr-3 inline-flex items-center justify-center rounded-md bg-gray-600/70 text-gray-200 border border-gray-500/40 text-sm">
+                      ←
+                    </span>
+                    Recibir por QR
+                  </span>
+                  <span className="hidden sm:inline-flex items-center text-[11px] text-gray-300/80 font-normal">
+                    Usa la cámara
+                  </span>
+                </div>
+              </button>
+            </div>
+          </div>
+
+          <button
+            onClick={() => void handleClose()}
+            className="w-full px-4 py-2 rounded-md bg-gray-700 hover:bg-gray-600 transition-colors mt-1"
+          >
+            Cancelar
+          </button>
+        </div>
+      )}
+
+      {mode === 'export' && (
+        <div className="space-y-4">
+          <p className="text-gray-400">
+            Crea una copia encriptada de toda tu bóveda. Tendrás que confirmar el mismo patrón dos veces.
+          </p>
+
+          <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-baseline gap-2">
+                <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-cyan-500/10 text-cyan-400 text-xs font-bold border border-cyan-500/30">
+                  {backupConfirmStep ? 2 : 1}
+                </span>
+                <p className="text-sm font-semibold text-gray-200">
+                  {backupConfirmStep ? 'Confirma el patrón' : 'Dibuja un patrón de protección'}
+                </p>
+              </div>
+              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                Paso {backupConfirmStep ? 2 : 1} de 2
+              </span>
+            </div>
+            <div className="h-1.5 w-full bg-gray-700 rounded-full overflow-hidden">
+              <div
+                className={`h-full transition-all duration-300 ${backupConfirmStep ? 'bg-cyan-500 w-full' : 'bg-cyan-500/70 w-1/2'}`}
+              />
+            </div>
+            <p className="text-xs text-gray-500">
+              {backupConfirmStep
+                ? 'Dibuja exactamente el mismo patrón para confirmar.'
+                : 'Conecta al menos 4 puntos. Deberás recordarlo para restaurar este respaldo.'}
+            </p>
+            <div className="flex justify-center">
+              <GesturePad
+                onPatternComplete={handleExportBackupPattern}
+                minPoints={4}
+                showError={!!patternError}
+                resetKey={backupPatternReset}
+              />
+            </div>
+            <div className="flex flex-wrap gap-2 justify-center items-center min-h-[20px]">
+              {backupPattern && !backupConfirmStep && (
+                <p className="text-xs text-green-400">✓ Patrón definido. Confírmalo dibujándolo de nuevo.</p>
+              )}
+              {backupConfirmStep && !backupConfirmPattern && (
+                <p className="text-xs text-cyan-400">Ya casi terminas: dibuja el mismo patrón una segunda vez.</p>
+              )}
+              {patternError && (
+                <p className="text-xs text-red-400">{patternError}</p>
               )}
             </div>
-
-            {error && <p className="text-red-400 text-sm pl-1">{error}</p>}
-            {success && <p className="text-green-400 text-sm pl-1">{success}</p>}
-
-            <div className="flex justify-between gap-3 pt-2">
-              <button
-                onClick={() => void changeMode('select')}
-                className="px-4 py-2 rounded-md bg-gray-600 hover:bg-gray-500 transition-colors min-w-[120px]"
-              >
-                Atrás
-              </button>
-              <button
-                onClick={() => void handleExport()}
-                disabled={!backupPattern || !backupConfirmPattern}
-                className="px-5 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold disabled:opacity-50 disabled:cursor-not-allowed min-w-[160px]"
-              >
-                Crear respaldo
-              </button>
-            </div>
+            {(backupPattern || backupConfirmPattern) && (
+              <div className="flex justify-center pt-1">
+                <button
+                  onClick={() => {
+                    setBackupPattern(null);
+                    setBackupConfirmPattern(null);
+                    setBackupConfirmStep(false);
+                    setBackupPatternReset((k) => k + 1);
+                    setPatternError('');
+                    setSuccess('');
+                  }}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-gray-700/60 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-600/40"
+                >
+                  ↺ Reiniciar patrones
+                </button>
+              </div>
+            )}
           </div>
-        )}
 
-        {mode === 'import' && (
-          <div key={`import-${importAnimKey}`} className="space-y-3 sm:space-y-4">
-            <div className="space-y-1">
-              <p className="text-gray-400 text-sm">
-                Restaura una copia de seguridad desde un archivo <code className="px-1 rounded bg-gray-700/60 text-cyan-300 text-xs">.vault</code> siguiendo este flujo guiado.
-              </p>
-            </div>
+          {error && <p className="text-red-400 text-sm pl-1">{error}</p>}
+          {success && <p className="text-green-400 text-sm pl-1">{success}</p>}
 
-            <div className="pt-0.5 pb-1.5 sm:pt-1 sm:pb-2">
-              <div className="max-w-[420px] mx-auto">
-                <div className="flex items-start justify-between px-0.5 sm:px-1">
-                  <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
-                    <div
-                      className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${
-                        importStep > 1
-                          ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
-                          : importStep === 1
+          <div className="flex justify-between gap-3 pt-2">
+            <button
+              onClick={() => void changeMode('select')}
+              className="px-4 py-2 rounded-md bg-gray-600 hover:bg-gray-500 transition-colors min-w-[120px]"
+            >
+              Atrás
+            </button>
+            <button
+              onClick={() => void handleExport()}
+              disabled={!backupPattern || !backupConfirmPattern}
+              className="px-5 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold disabled:opacity-50 disabled:cursor-not-allowed min-w-[160px]"
+            >
+              Crear respaldo
+            </button>
+          </div>
+        </div>
+      )}
+
+      {mode === 'import' && (
+        <div key={`import-${importAnimKey}`} className="space-y-3 sm:space-y-4">
+          <div className="space-y-1">
+            <p className="text-gray-400 text-sm">
+              Restaura una copia de seguridad desde un archivo <code className="px-1 rounded bg-gray-700/60 text-cyan-300 text-xs">.vault</code> siguiendo este flujo guiado.
+            </p>
+          </div>
+
+          <div className="pt-0.5 pb-1.5 sm:pt-1 sm:pb-2">
+            <div className="max-w-[420px] mx-auto">
+              <div className="flex items-start justify-between px-0.5 sm:px-1">
+                <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
+                  <div
+                    className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${importStep > 1
+                        ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
+                        : importStep === 1
                           ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
                           : 'bg-gray-800 border-gray-600 text-gray-500'
                       }`}
-                    >
-                      {importStep > 1 ? '✓' : '1'}
-                    </div>
-                    <div className="text-center">
-                      <p
-                        className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${
-                          importStep >= 1 ? 'text-gray-200' : 'text-gray-500'
+                  >
+                    {importStep > 1 ? '✓' : '1'}
+                  </div>
+                  <div className="text-center">
+                    <p
+                      className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${importStep >= 1 ? 'text-gray-200' : 'text-gray-500'
                         }`}
-                      >
-                        Archivo
-                      </p>
-                    </div>
+                    >
+                      Archivo
+                    </p>
                   </div>
+                </div>
 
-                  <div className="flex-1 flex items-center pt-3 sm:pt-4 mx-0.5 sm:mx-1">
-                    <div
-                      className={`h-0.5 w-full rounded-full transition-colors ${
-                        importStep > 1 ? 'bg-cyan-500' : 'bg-gray-700'
+                <div className="flex-1 flex items-center pt-3 sm:pt-4 mx-0.5 sm:mx-1">
+                  <div
+                    className={`h-0.5 w-full rounded-full transition-colors ${importStep > 1 ? 'bg-cyan-500' : 'bg-gray-700'
                       }`}
-                    />
-                  </div>
+                  />
+                </div>
 
-                  <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
-                    <div
-                      className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${
-                        importStep > 2
-                          ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
-                          : importStep === 2
+                <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
+                  <div
+                    className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${importStep > 2
+                        ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
+                        : importStep === 2
                           ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
                           : 'bg-gray-800 border-gray-600 text-gray-500'
                       }`}
-                    >
-                      {importStep > 2 ? '✓' : '2'}
-                    </div>
-                    <div className="text-center">
-                      <p
-                        className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${
-                          importStep >= 2 ? 'text-gray-200' : 'text-gray-500'
-                        }`}
-                      >
-                        Patrón
-                      </p>
-                    </div>
+                  >
+                    {importStep > 2 ? '✓' : '2'}
                   </div>
-
-                  <div className="flex-1 flex items-center pt-3 sm:pt-4 mx-0.5 sm:mx-1">
-                    <div
-                      className={`h-0.5 w-full rounded-full transition-colors ${
-                        importStep > 2 ? 'bg-cyan-500' : 'bg-gray-700'
-                      }`}
-                    />
-                  </div>
-
-                  <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
-                    <div
-                      className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${
-                        importStep >= 3
-                          ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
-                          : 'bg-gray-800 border-gray-600 text-gray-500'
-                      }`}
-                    >
-                      3
-                    </div>
-                    <div className="text-center">
-                      <p
-                        className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${
-                          importStep >= 3 ? 'text-gray-200' : 'text-gray-500'
+                  <div className="text-center">
+                    <p
+                      className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${importStep >= 2 ? 'text-gray-200' : 'text-gray-500'
                         }`}
-                      >
-                        Confirmar
-                      </p>
-                    </div>
+                    >
+                      Patrón
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex-1 flex items-center pt-3 sm:pt-4 mx-0.5 sm:mx-1">
+                  <div
+                    className={`h-0.5 w-full rounded-full transition-colors ${importStep > 2 ? 'bg-cyan-500' : 'bg-gray-700'
+                      }`}
+                  />
+                </div>
+
+                <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
+                  <div
+                    className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${importStep >= 3
+                        ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
+                        : 'bg-gray-800 border-gray-600 text-gray-500'
+                      }`}
+                  >
+                    3
+                  </div>
+                  <div className="text-center">
+                    <p
+                      className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${importStep >= 3 ? 'text-gray-200' : 'text-gray-500'
+                        }`}
+                    >
+                      Confirmar
+                    </p>
                   </div>
                 </div>
               </div>
             </div>
+          </div>
 
-            <div>
-              {(() => {
-                if (importStep === 1) {
-                  return (
-                    <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3 sm:space-y-4">
-                      <div>
-                        <p className="text-sm font-semibold text-gray-200">
-                          Paso 1 — Selecciona el archivo
-                        </p>
-                        <p className="text-xs text-gray-500 mt-0.5">
-                          Elige el archivo <code className="px-1 rounded bg-gray-800 text-cyan-300 text-[10px]">.vault</code> generado por SecurePass.
-                        </p>
+          <div>
+            {(() => {
+              if (importStep === 1) {
+                return (
+                  <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3 sm:space-y-4">
+                    <div>
+                      <p className="text-sm font-semibold text-gray-200">
+                        Paso 1 — Selecciona el archivo
+                      </p>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        Elige el archivo <code className="px-1 rounded bg-gray-800 text-cyan-300 text-[10px]">.vault</code> generado por SecurePass.
+                      </p>
+                    </div>
+                    <div className="space-y-2">
+                      <button
+                        onClick={handleVaultFileSelect}
+                        className="w-full p-3 bg-gray-700 rounded-md border border-gray-600 hover:bg-gray-600 transition-colors text-left"
+                      >
+                        {selectedFileName || 'Seleccionar archivo .vault...'}
+                      </button>
+                      <input
+                        ref={vaultFileInputRef}
+                        type="file"
+                        accept=".vault,.json,.vault.json,application/json,application/octet-stream"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0] ?? null;
+                          if (f) {
+                            setSelectedFile(f);
+                            setSelectedFileName(f.name);
+                            setTimeout(() => void handleImportNext(), 140);
+                          } else {
+                            setSelectedFile(null);
+                            setSelectedFileName('');
+                          }
+                        }}
+                        className="hidden"
+                      />
+                    </div>
+                    {selectedFileName && (
+                      <div className="flex items-start gap-3 text-sm rounded-md border border-green-500/20 bg-green-500/5 px-3 py-2.5">
+                        <div className="text-green-400 text-lg leading-none mt-0.5">✓</div>
+                        <div className="min-w-0 flex-1">
+                          <p className="text-gray-100 font-medium">Archivo cargado</p>
+                          <p className="text-gray-500 truncate mt-0.5">{selectedFileName}</p>
+                        </div>
                       </div>
+                    )}
+                    {!selectedFileName && (
+                      <p className="text-sm text-cyan-500 font-medium text-center pt-1">
+                        Selecciona un archivo .vault para continuar.
+                      </p>
+                    )}
+                  </div>
+                );
+              }
+
+              if (importStep === 2) {
+                return (
+                  <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3 sm:space-y-4">
+                    <div>
+                      <p className="text-sm font-semibold text-gray-200">
+                        Paso 2 — Patrón de desbloqueo del respaldo
+                      </p>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        Dibuja el patrón con el que se protegió este archivo cuando se creó.
+                      </p>
+                    </div>
+                    <div className="flex justify-center">
+                      <GesturePad
+                        onPatternComplete={(p) => {
+                          setImportPattern(p);
+                          setSuccess('Patrón capturado. Validando archivo...');
+                          setTimeout(() => void handleImportNext(), 160);
+                        }}
+                        minPoints={4}
+                        resetKey={importPatternReset}
+                      />
+                    </div>
+                    {importPattern && (
                       <div className="space-y-2">
-                        <button
-                          onClick={handleVaultFileSelect}
-                          className="w-full p-3 bg-gray-700 rounded-md border border-gray-600 hover:bg-gray-600 transition-colors text-left"
-                        >
-                          {selectedFileName || 'Seleccionar archivo .vault...'}
-                        </button>
-                        <input
-                          ref={vaultFileInputRef}
-                          type="file"
-                          accept=".vault,.json,.vault.json,application/json,application/octet-stream"
-                          onChange={(e) => {
-                            const f = e.target.files?.[0] ?? null;
-                            if (f) {
-                              setSelectedFile(f);
-                              setSelectedFileName(f.name);
-                              setTimeout(() => void handleImportNext(), 140);
-                            } else {
-                              setSelectedFile(null);
-                              setSelectedFileName('');
-                            }
-                          }}
-                          className="hidden"
-                        />
-                      </div>
-                      {selectedFileName && (
-                        <div className="flex items-start gap-3 text-sm rounded-md border border-green-500/20 bg-green-500/5 px-3 py-2.5">
-                          <div className="text-green-400 text-lg leading-none mt-0.5">✓</div>
-                          <div className="min-w-0 flex-1">
-                            <p className="text-gray-100 font-medium">Archivo cargado</p>
-                            <p className="text-gray-500 truncate mt-0.5">{selectedFileName}</p>
-                          </div>
+                        <p className="text-center text-xs text-green-400">✓ Patrón introducido.</p>
+                        <div className="flex justify-center pt-1">
+                          <button
+                            onClick={() => {
+                              setImportPattern(null);
+                              setImportPatternReset((k) => k + 1);
+                              setSuccess('');
+                            }}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-gray-700/60 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-600/40"
+                          >
+                            ↺ Reiniciar patrón
+                          </button>
                         </div>
-                      )}
-                      {!selectedFileName && (
-                        <p className="text-sm text-cyan-500 font-medium text-center pt-1">
-                          Selecciona un archivo .vault para continuar.
-                        </p>
-                      )}
-                    </div>
-                  );
-                }
+                      </div>
+                    )}
+                    {!importPattern && (
+                      <p className="text-sm text-cyan-500 font-medium text-center pt-1">
+                        Dibuja el patrón del archivo para continuar.
+                      </p>
+                    )}
+                  </div>
+                );
+              }
 
-                if (importStep === 2) {
-                  return (
-                    <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3 sm:space-y-4">
-                      <div>
-                        <p className="text-sm font-semibold text-gray-200">
-                          Paso 2 — Patrón de desbloqueo del respaldo
+              return (
+                <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3 sm:space-y-4">
+                  <div className="flex items-start justify-between gap-3 flex-wrap">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-gray-200">
+                        Paso 3 — Confirma la restauración
+                      </p>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        Elige cómo integrar estas contraseñas en tu bóveda local.
+                      </p>
+                    </div>
+                    <span className="text-xs font-semibold text-gray-500">
+                      {previewImportedPasswords?.length ?? 0} contraseñas
+                    </span>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label
+                      className={`flex items-start gap-3 p-3 rounded-md border transition-colors cursor-pointer ${importMode === 'merge'
+                          ? 'border-cyan-500/60 bg-cyan-500/5'
+                          : 'border-gray-600 bg-gray-800/40 hover:border-gray-500'
+                        }`}
+                    >
+                      <input
+                        type="radio"
+                        value="merge"
+                        checked={importMode === 'merge'}
+                        onChange={(e) => setImportMode(e.target.value as ImportMode)}
+                        className="mt-1 mr-1"
+                      />
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-gray-200">
+                          Agregar a las existentes
                         </p>
                         <p className="text-xs text-gray-500 mt-0.5">
-                          Dibuja el patrón con el que se protegió este archivo cuando se creó.
+                          Fusiona las nuevas contraseñas con las actuales. Se actualizarán aquellas con el mismo sitio y usuario.
                         </p>
                       </div>
-                      <div className="flex justify-center">
-                        <GesturePad
-                          onPatternComplete={(p) => {
-                            setImportPattern(p);
-                            setSuccess('Patrón capturado. Validando archivo...');
-                            setTimeout(() => void handleImportNext(), 160);
-                          }}
-                          minPoints={4}
-                          resetKey={importPatternReset}
-                        />
+                    </label>
+                    <label
+                      className={`flex items-start gap-3 p-3 rounded-md border transition-colors cursor-pointer ${importMode === 'overwrite'
+                          ? 'border-cyan-500/60 bg-cyan-500/5'
+                          : 'border-gray-600 bg-gray-800/40 hover:border-gray-500'
+                        }`}
+                    >
+                      <input
+                        type="radio"
+                        value="overwrite"
+                        checked={importMode === 'overwrite'}
+                        onChange={(e) => setImportMode(e.target.value as ImportMode)}
+                        className="mt-1 mr-1"
+                      />
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-gray-200">Reemplazar todas</p>
+                        <p className="text-xs text-gray-500 mt-0.5">
+                          Elimina las contraseñas actuales y deja solo las del archivo. Esta acción no se puede deshacer.
+                        </p>
                       </div>
-                      {importPattern && (
-                        <div className="space-y-2">
-                          <p className="text-center text-xs text-green-400">✓ Patrón introducido.</p>
-                          <div className="flex justify-center pt-1">
-                            <button
-                              onClick={() => {
-                                setImportPattern(null);
-                                setImportPatternReset((k) => k + 1);
-                                setSuccess('');
-                              }}
-                              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-gray-700/60 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-600/40"
-                            >
-                              ↺ Reiniciar patrón
-                            </button>
-                          </div>
+                    </label>
+                  </div>
+
+                  <div className="rounded-md border border-gray-700 bg-gray-800/40 p-3">
+                    <p className="text-xs font-semibold text-gray-400 mb-2 uppercase tracking-wider">
+                      Vista previa
+                    </p>
+                    <div className="max-h-[240px] overflow-y-auto space-y-2 pr-1">
+                      {previewImportedPasswords?.map((entry) => (
+                        <div
+                          key={entry.id}
+                          className="p-3 rounded-md bg-gray-800 border border-gray-700"
+                        >
+                          <p className="font-semibold text-cyan-400 truncate">{entry.site}</p>
+                          <p className="text-sm text-gray-300 truncate">{entry.username}</p>
+                          <p className="text-xs text-gray-500 mt-1 truncate">{entry.category}</p>
                         </div>
-                      )}
-                      {!importPattern && (
-                        <p className="text-sm text-cyan-500 font-medium text-center pt-1">
-                          Dibuja el patrón del archivo para continuar.
+                      ))}
+                      {(!previewImportedPasswords || previewImportedPasswords.length === 0) && (
+                        <p className="text-sm text-gray-500 italic text-center py-4">
+                          No hay contraseñas para mostrar.
                         </p>
                       )}
                     </div>
-                  );
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+
+          {error && <p className="text-red-400 text-sm pl-1">{error}</p>}
+          {success && importStep !== 1 && (
+            <p className="text-green-400 text-sm pl-1">{success}</p>
+          )}
+
+          <div className="flex justify-between gap-3 pt-2">
+            <button
+              onClick={handleImportBack}
+              className="px-4 py-2 rounded-md bg-gray-600 hover:bg-gray-500 transition-colors min-w-[120px]"
+            >
+              Atrás
+            </button>
+            {(() => {
+              const nextDisabled =
+                (importStep === 1 && !selectedFile) ||
+                (importStep === 2 && (!importPattern || importPattern.length < 4)) ||
+                (importStep === 3 && (!previewImportedPasswords || previewImportedPasswords.length === 0));
+              return (
+                <button
+                  onClick={() => void handleImportNext()}
+                  disabled={nextDisabled}
+                  className="px-5 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold disabled:opacity-50 disabled:cursor-not-allowed min-w-[200px]"
+                >
+                  {importStep === 3 ? 'Restaurar respaldo' : 'Siguiente'}
+                </button>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
+      {mode === 'shareQR' && (
+        <div className="space-y-3.5 sm:space-y-5">
+          <div className="space-y-1">
+            <p className="text-gray-400 text-sm">
+              Transfiere contraseñas cifradas a otro dispositivo siguiendo este flujo guiado.
+            </p>
+          </div>
+
+          <div className="pt-0.5 pb-1.5 sm:pt-1 sm:pb-2">
+            <div className="max-w-[420px] mx-auto">
+              <div className="flex items-start justify-between px-0.5 sm:px-1">
+                <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
+                  <div
+                    className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${shareQRStep > 1
+                        ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
+                        : shareQRStep === 1
+                          ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
+                          : 'bg-gray-800 border-gray-600 text-gray-500'
+                      }`}
+                  >
+                    {shareQRStep > 1 ? '✓' : '1'}
+                  </div>
+                  <div className="text-center">
+                    <p
+                      className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${shareQRStep >= 1 ? 'text-gray-200' : 'text-gray-500'
+                        }`}
+                    >
+                      Seleccionar
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex-1 flex items-center pt-3 sm:pt-4 mx-0.5 sm:mx-1">
+                  <div
+                    className={`h-0.5 w-full rounded-full transition-colors ${shareQRStep > 1 ? 'bg-cyan-500' : 'bg-gray-700'
+                      }`}
+                  />
+                </div>
+
+                <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
+                  <div
+                    className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${shareQRStep > 2
+                        ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
+                        : shareQRStep === 2
+                          ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
+                          : 'bg-gray-800 border-gray-600 text-gray-500'
+                      }`}
+                  >
+                    {shareQRStep > 2 ? '✓' : '2'}
+                  </div>
+                  <div className="text-center">
+                    <p
+                      className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${shareQRStep >= 2 ? 'text-gray-200' : 'text-gray-500'
+                        }`}
+                    >
+                      Patrón
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex-1 flex items-center pt-3 sm:pt-4 mx-0.5 sm:mx-1">
+                  <div
+                    className={`h-0.5 w-full rounded-full transition-colors ${shareQRStep > 2 ? 'bg-cyan-500' : 'bg-gray-700'
+                      }`}
+                  />
+                </div>
+
+                <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
+                  <div
+                    className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${shareQRStep >= 3
+                        ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
+                        : 'bg-gray-800 border-gray-600 text-gray-500'
+                      }`}
+                  >
+                    3
+                  </div>
+                  <div className="text-center">
+                    <p
+                      className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${shareQRStep >= 3 ? 'text-gray-200' : 'text-gray-500'
+                        }`}
+                    >
+                      QR
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div
+            key={shareQRAnimKey}
+            className="animate-in fade-in zoom-in-[99%] duration-200 ease-out"
+          >
+            {shareQRStep === 1 && (
+              <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4">
+                <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                  <div>
+                    <p className="text-sm font-semibold text-gray-200 flex items-center gap-2">
+                      {showOnlySelected ? 'Paso 1 — Contraseña seleccionada' : 'Paso 1 — Selecciona las contraseñas'}
+                      {showOnlySelected && (
+                        <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+                          Acceso directo
+                        </span>
+                      )}
+                    </p>
+                    <p className="text-xs text-gray-400 mt-0.5">
+                      {showOnlySelected
+                        ? 'Se enviará únicamente esta entrada. Pulsa "Continuar" para definir el patrón.'
+                        : 'Elige qué entradas quieres transferir al otro dispositivo.'}
+                    </p>
+                  </div>
+                  <div className="flex flex-col items-end gap-1">
+                    <span className="text-xs font-semibold text-gray-400 px-2 py-0.5 rounded-md bg-gray-800/70 border border-gray-700/60">
+                      {showOnlySelected
+                        ? `${selectedPasswordIds.length} seleccionada`
+                        : `${selectedPasswordIds.length} / ${passwords.length}`}
+                    </span>
+                    {(() => {
+                      if (selectedPasswordIds.length === 0) return null;
+                      const selected = passwords.filter((p) => selectedPasswordIds.includes(p.id));
+                      const rough = roughEstimateQRChunks(sanitizePasswordsForQR(selected));
+                      const exact = qrSharePattern
+                        ? estimateQRChunksNeeded(
+                          { passwords: sanitizePasswordsForQR(selected) },
+                          patternToString(qrSharePattern)
+                        )
+                        : null;
+                      const count = exact ?? rough;
+                      return (
+                        <span className="text-xs font-semibold px-2 py-0.5 rounded-md bg-cyan-500/15 border border-cyan-500/30 text-cyan-300">
+                          ~{count} QR{count > 1 ? 's' : ''} necesario{count > 1 ? 's' : ''}
+                        </span>
+                      );
+                    })()}
+                  </div>
+                </div>
+
+                {displayedSharePasswords.length === 0 ? (
+                  <div className="p-4 rounded-md border border-gray-700 bg-gray-800/60 text-gray-400 text-center">
+                    No hay contraseñas disponibles para enviar.
+                  </div>
+                ) : (
+                  <div className="max-h-[360px] overflow-y-auto space-y-2 pr-1">
+                    {displayedSharePasswords.map((entry) => {
+                      const isSelected = selectedPasswordIds.includes(entry.id);
+                      return (
+                        <button
+                          key={entry.id}
+                          type="button"
+                          onClick={() => togglePasswordSelection(entry.id)}
+                          className={`w-full text-left p-3 rounded-md border transition-colors ${isSelected
+                              ? 'border-cyan-500/60 bg-cyan-500/10'
+                              : 'border-gray-700 bg-gray-800/50 hover:bg-gray-700/40'
+                            }`}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="font-semibold text-cyan-400 truncate">{entry.site}</p>
+                              <p className="text-sm text-gray-300 truncate">{entry.username}</p>
+                              <p className="text-xs text-gray-500 mt-1 truncate">{entry.category}</p>
+                            </div>
+                            <div className={`mt-0.5 h-5 w-5 flex-shrink-0 rounded border flex items-center justify-center ${isSelected ? 'border-cyan-400 bg-cyan-500/25' : 'border-gray-500'
+                              }`}>
+                              {isSelected && <span className="text-cyan-200 text-xs font-bold">✓</span>}
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {passwords.length > 0 && (
+                  <div className="flex items-center justify-between pt-3 mt-3 border-t border-gray-700/60 flex-wrap gap-2">
+                    {showOnlySelected ? (
+                      <button
+                        type="button"
+                        onClick={() => setShowOnlySelected(false)}
+                        className="text-xs text-cyan-400 hover:text-cyan-300 transition-colors flex items-center gap-1 font-medium"
+                      >
+                        <span>+ Ver catálogo completo ({passwords.length} contraseñas)</span>
+                      </button>
+                    ) : (
+                      <>
+                        <div className="flex items-center gap-3">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedPasswordIds(passwords.map(p => p.id))}
+                            className="text-xs text-cyan-400 hover:text-cyan-300 transition-colors"
+                          >
+                            Seleccionar todas
+                          </button>
+                          {selectedPasswordIds.length > 0 && selectedPasswordIds.length < passwords.length && (
+                            <button
+                              type="button"
+                              onClick={() => setShowOnlySelected(true)}
+                              className="text-xs text-cyan-400 hover:text-cyan-300 transition-colors"
+                            >
+                              Ver solo seleccionadas ({selectedPasswordIds.length})
+                            </button>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedPasswordIds([])}
+                          disabled={selectedPasswordIds.length === 0}
+                          className="text-xs text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          Limpiar selección
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {shareQRStep === 2 && (
+              <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3">
+                <div>
+                  <p className="text-sm font-semibold text-gray-200">
+                    Paso 2 — Patrón de desbloqueo de este dispositivo
+                  </p>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    Dibuja el patrón que usas para abrir SecurePass aquí. Servirá para cifrar el contenido del QR.
+                  </p>
+                </div>
+                <div className="flex justify-center pt-2">
+                  <GesturePad
+                    onPatternComplete={(p) => {
+                      setQrSharePattern(p);
+                      setError('');
+                    }}
+                    minPoints={4}
+                    resetKey={qrSharePatternReset}
+                  />
+                </div>
+                <div className="flex flex-col items-center gap-1 min-h-[44px]">
+                  {qrSharePattern && (
+                    <p className="text-xs text-green-400">✓ Patrón listo para cifrar.</p>
+                  )}
+                  {qrSharePattern && (
+                    <button
+                      onClick={() => {
+                        setQrSharePattern(null);
+                        setQrSharePatternReset((k) => k + 1);
+                        setGeneratedQRData('');
+                      }}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-gray-700/60 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-600/40"
+                    >
+                      ↺ Reiniciar patrón
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {shareQRStep === 3 && (
+              <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3 sm:space-y-4">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <div>
+                    <p className="text-sm font-semibold text-gray-200">
+                      Paso 3 — Transferencia en curso
+                    </p>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      {generatedQRChunks.length > 1
+                        ? 'Muestra todos los códigos QR al otro dispositivo. Puedes navegar con las flechas.'
+                        : 'Muéstraselo al otro dispositivo o guárdalo como imagen.'}
+                    </p>
+                  </div>
+                  {generatedQRChunks.length > 1 && (
+                    <div className="flex flex-col items-end gap-1">
+                      <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-cyan-500/15 border border-cyan-500/30 text-cyan-300">
+                        QR {currentQRChunkIndex + 1} / {generatedQRChunks.length}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {generatedQRChunks.length > 1 && (
+                  <div className="h-1.5 w-full bg-gray-800 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-cyan-500 to-cyan-400 transition-[width] duration-200"
+                      style={{
+                        width: `${((currentQRChunkIndex + 1) / generatedQRChunks.length) * 100}%`
+                      }}
+                    />
+                  </div>
+                )}
+
+                <div className="flex flex-col items-center justify-center text-center py-1">
+                  {generatedQRData ? (
+                    <div className="flex flex-col items-center gap-3">
+                      <div className="bg-white p-3 rounded-lg shadow-lg">
+                        <div ref={qrCodeContainerRef}>
+                          <QRCode value={generatedQRData} size={300} level="Q" />
+                        </div>
+                      </div>
+                      <div className="flex flex-col items-center gap-2">
+                        <button
+                          onClick={() => void handleSaveQRImage()}
+                          className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-gray-700 hover:bg-gray-600 transition-colors text-sm border border-gray-600"
+                        >
+                          💾 Guardar como imagen PNG
+                        </button>
+                        <p className="text-xs text-gray-500 max-w-[320px]">
+                          El otro dispositivo necesitará el patrón de desbloqueo de este dispositivo para descifrarlo.
+                        </p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center gap-2 text-gray-500 px-2">
+                      <div className="w-20 h-20 rounded-lg border-2 border-dashed border-gray-600 flex items-center justify-center text-3xl opacity-50">
+                        ⬚
+                      </div>
+                      <p className="text-sm">
+                        Generando QR cifrado…
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {generatedQRChunks.length > 1 && (
+                  <div className="flex items-center justify-between gap-3 pt-2 border-t border-gray-700/60">
+                    <button
+                      onClick={() => {
+                        setCurrentQRChunkIndex((prev) => {
+                          const next = Math.max(0, prev - 1);
+                          setGeneratedQRData(generatedQRChunks[next] || '');
+                          return next;
+                        });
+                      }}
+                      disabled={currentQRChunkIndex === 0}
+                      className="inline-flex items-center gap-1 px-3 py-2 rounded-md bg-gray-700/70 hover:bg-gray-700 text-sm text-gray-200 border border-gray-600/50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    >
+                      ← Anterior
+                    </button>
+                    <p className="text-xs text-gray-500 font-medium">
+                      Puede escanearse en cualquier orden
+                    </p>
+                    <button
+                      onClick={() => {
+                        setCurrentQRChunkIndex((prev) => {
+                          const next = Math.min(generatedQRChunks.length - 1, prev + 1);
+                          setGeneratedQRData(generatedQRChunks[next] || '');
+                          return next;
+                        });
+                      }}
+                      disabled={currentQRChunkIndex >= generatedQRChunks.length - 1}
+                      className="inline-flex items-center gap-1 px-3 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 text-sm text-white font-semibold disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    >
+                      Siguiente →
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {error && <p className="text-red-400 text-sm pl-1">{error}</p>}
+          {success && <p className="text-green-400 text-sm pl-1">{success}</p>}
+
+          <div className="flex justify-between gap-3 pt-2">
+            <button
+              onClick={async () => {
+                setError('');
+                if (shareQRStep === 1) {
+                  await changeMode('select');
+                  return;
                 }
+                const next = (shareQRStep - 1) as 1 | 2 | 3;
+                setShareQRStep(next);
+                setShareQRAnimKey((k) => k + 1);
+                if (next === 2) {
+                  setGeneratedQRData('');
+                  setGeneratedQRChunks([]);
+                  setCurrentQRChunkIndex(0);
+                }
+              }}
+              className="px-4 py-2 rounded-md bg-gray-600 hover:bg-gray-500 transition-colors min-w-[120px]"
+            >
+              Atrás
+            </button>
+
+            {shareQRStep < 3 ? (
+              <button
+                onClick={async () => {
+                  setError('');
+                  if (shareQRStep === 1) {
+                    if (selectedPasswordIds.length === 0) {
+                      setError('Selecciona al menos una contraseña para continuar.');
+                      return;
+                    }
+                    setShareQRStep(2);
+                    setShareQRAnimKey((k) => k + 1);
+                    return;
+                  }
+                  if (shareQRStep === 2) {
+                    if (!qrSharePattern) {
+                      setError('Dibuja tu patrón de desbloqueo para continuar.');
+                      return;
+                    }
+                    const ok = handleGenerateQR();
+                    if (ok) {
+                      setShareQRStep(3);
+                      setShareQRAnimKey((k) => k + 1);
+                    }
+                  }
+                }}
+                disabled={
+                  (shareQRStep === 1 && selectedPasswordIds.length === 0) ||
+                  (shareQRStep === 2 && !qrSharePattern)
+                }
+                className="px-5 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold disabled:opacity-50 disabled:cursor-not-allowed min-w-[160px]"
+              >
+                Continuar
+              </button>
+            ) : (
+              <button
+                onClick={() => void handleClose()}
+                className="px-5 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold min-w-[160px]"
+              >
+                Finalizar
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {mode === 'scanQR' && (
+        <div className="space-y-3 sm:space-y-4">
+          <p className="text-gray-400 text-sm">
+            Recibe contraseñas desde otro dispositivo usando la cámara o una imagen QR. Si la transferencia usa varios códigos, escanéalos todos.
+          </p>
+
+          <div className="max-w-[420px] mx-auto">
+            <div className="flex items-start justify-between px-0.5 sm:px-1">
+              <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
+                <div
+                  className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${scanQRStep > 1
+                      ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
+                      : scanQRStep === 1
+                        ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
+                        : 'bg-gray-800 border-gray-600 text-gray-500'
+                    }`}
+                >
+                  {scanQRStep > 1 ? '✓' : '1'}
+                </div>
+                <div className="text-center">
+                  <p
+                    className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${scanQRStep >= 1 ? 'text-gray-200' : 'text-gray-500'
+                      }`}
+                  >
+                    Escanear
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex-1 flex items-center pt-3 sm:pt-4 mx-0.5 sm:mx-1">
+                <div
+                  className={`h-0.5 w-full rounded-full transition-colors ${scanQRStep > 1 ? 'bg-cyan-500' : 'bg-gray-700'
+                    }`}
+                />
+              </div>
+
+              <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
+                <div
+                  className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${scanQRStep > 2
+                      ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
+                      : scanQRStep === 2
+                        ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
+                        : 'bg-gray-800 border-gray-600 text-gray-500'
+                    }`}
+                >
+                  {scanQRStep > 2 ? '✓' : '2'}
+                </div>
+                <div className="text-center">
+                  <p
+                    className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${scanQRStep >= 2 ? 'text-gray-200' : 'text-gray-500'
+                      }`}
+                  >
+                    Patrón
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex-1 flex items-center pt-3 sm:pt-4 mx-0.5 sm:mx-1">
+                <div
+                  className={`h-0.5 w-full rounded-full transition-colors ${scanQRStep > 2 ? 'bg-cyan-500' : 'bg-gray-700'
+                    }`}
+                />
+              </div>
+
+              <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
+                <div
+                  className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${scanQRStep >= 3
+                      ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
+                      : 'bg-gray-800 border-gray-600 text-gray-500'
+                    }`}
+                >
+                  3
+                </div>
+                <div className="text-center">
+                  <p
+                    className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${scanQRStep >= 3 ? 'text-gray-200' : 'text-gray-500'
+                      }`}
+                  >
+                    Confirmar
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div
+            key={scanQRAnimKey}
+            className="animate-in fade-in zoom-in-[99%] duration-200 ease-out"
+          >
+            {(() => {
+              const readySingle = !!pendingQRPayload;
+              const multi = !!activeTransferId && !!receivedChunks[activeTransferId];
+              const readyMulti =
+                multi &&
+                Object.keys(receivedChunks[activeTransferId].chunks).length ===
+                receivedChunks[activeTransferId].totalChunks;
+              const transferReady = readySingle || readyMulti;
+
+              if (scanQRStep === 1) {
+                const partialMulti =
+                  multi &&
+                  Object.keys(receivedChunks[activeTransferId].chunks).length <
+                  receivedChunks[activeTransferId].totalChunks;
+                const loadedAny = readySingle || multi;
+                const imageBtnLabel = partialMulti
+                  ? 'Cargar siguiente imagen QR'
+                  : readySingle
+                    ? 'Cargar otra imagen QR'
+                    : 'Cargar imagen QR';
 
                 return (
                   <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3 sm:space-y-4">
-                    <div className="flex items-start justify-between gap-3 flex-wrap">
-                      <div className="min-w-0">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <div>
                         <p className="text-sm font-semibold text-gray-200">
-                          Paso 3 — Confirma la restauración
+                          Paso 1 — Obtén los QR
+                        </p>
+                        <p className="text-xs text-gray-500 mt-0.5">
+                          Usa la cámara del dispositivo o carga una imagen PNG/JPG.
+                        </p>
+                      </div>
+                      {multi && (
+                        <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-cyan-500/15 border border-cyan-500/30 text-cyan-300">
+                          {Object.keys(receivedChunks[activeTransferId].chunks).length} /{' '}
+                          {receivedChunks[activeTransferId].totalChunks}
+                        </span>
+                      )}
+                    </div>
+
+                    {multi && (
+                      <div className="space-y-2">
+                        <div className="h-1.5 w-full bg-gray-800 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-gradient-to-r from-cyan-500 to-cyan-400 transition-[width] duration-200"
+                            style={{
+                              width: `${(Object.keys(
+                                receivedChunks[activeTransferId].chunks
+                              ).length /
+                                receivedChunks[activeTransferId].totalChunks) *
+                                100}%`
+                            }}
+                          />
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {Array.from(
+                            { length: receivedChunks[activeTransferId].totalChunks },
+                            (_, i) => i + 1
+                          ).map((chunkIndex) => {
+                            const done = !!receivedChunks[activeTransferId].chunks[chunkIndex];
+                            return (
+                              <div
+                                key={chunkIndex}
+                                className={`w-6 h-6 rounded-md flex items-center justify-center text-[10px] font-bold border transition-colors ${done
+                                    ? 'bg-cyan-500/30 border-cyan-500/60 text-cyan-200'
+                                    : 'bg-gray-800 border-gray-600 text-gray-500'
+                                  }`}
+                              >
+                                {done ? '✓' : chunkIndex}
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <p className="text-[11px] text-gray-500 pl-0.5">
+                          Transferencia #{activeTransferId}
+                        </p>
+                      </div>
+                    )}
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <button
+                        onClick={() => void handleStartCameraScan()}
+                        className="w-full px-4 py-2.5 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold text-sm"
+                      >
+                        Usar cámara
+                      </button>
+                      <button
+                        onClick={handleImageFileSelect}
+                        className="w-full px-4 py-2.5 rounded-md bg-gray-600 hover:bg-gray-500 transition-colors font-semibold text-sm"
+                      >
+                        {imageBtnLabel}
+                      </button>
+                    </div>
+
+                    <input
+                      ref={imageFileInputRef}
+                      type="file"
+                      accept=".png,.jpg,.jpeg,image/png,image/jpeg"
+                      onChange={(e) => void handleImageSelection(e.target.files?.[0] || null)}
+                      className="hidden"
+                    />
+
+                    {scanSource === 'camera' && !pendingQRPayload && (
+                      <div className="rounded-lg border border-gray-700 overflow-hidden space-y-2">
+                        {(hasTorch || availableCameras.length > 1) && (
+                          <div className="flex items-center justify-between gap-2 px-3 py-2 bg-gray-900/80 border-b border-gray-700">
+                            <div className="flex items-center gap-1.5">
+                              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                              <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+                                Cámara activa
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              {hasTorch && (
+                                <button
+                                  onClick={() => void toggleTorch()}
+                                  className={`p-1.5 rounded-md border text-[11px] font-medium flex items-center gap-1 transition-all ${torchOn
+                                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 shadow-[0_0_12px_rgba(245,158,11,0.15)]'
+                                      : 'bg-gray-800 text-gray-300 border-gray-600 hover:bg-gray-700'
+                                    }`}
+                                  title={torchOn ? 'Apagar linterna' : 'Encender linterna'}
+                                >
+                                  {torchOn ? (
+                                    <ZapIcon className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
+                                  ) : (
+                                    <ZapOffIcon className="w-3.5 h-3.5" />
+                                  )}
+                                  <span className="hidden sm:inline">
+                                    {torchOn ? 'Linterna On' : 'Linterna'}
+                                  </span>
+                                </button>
+                              )}
+                              {availableCameras.length > 1 && (
+                                <button
+                                  onClick={() => void handleToggleFrontBack()}
+                                  className="p-1.5 rounded-md border bg-gray-800 text-gray-300 border-gray-600 hover:bg-gray-700 transition-all flex items-center gap-1 text-[11px] font-medium"
+                                  title="Cambiar lente (frontal/trasera)"
+                                >
+                                  <SwitchCameraIcon className="w-3.5 h-3.5 text-cyan-400" />
+                                  <span className="hidden sm:inline">Cambiar</span>
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="relative w-full bg-black">
+                          <div
+                            id={QR_READER_ELEMENT_ID}
+                            className="w-full min-h-[220px] sm:min-h-[260px] overflow-hidden bg-black"
+                          />
+                          <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                            <div
+                              className="relative flex items-center justify-center animate-qr-reticle-pulse"
+                              style={{ width: '220px', height: '220px' }}
+                            >
+                              <div className="absolute inset-0 rounded-xl border border-cyan-400/40 shadow-[0_0_40px_rgba(34,211,238,0.15)]" />
+                              <div className="absolute top-0 left-0 w-6 h-6 border-t-[3px] border-l-[3px] border-cyan-400 rounded-tl-lg" />
+                              <div className="absolute top-0 right-0 w-6 h-6 border-t-[3px] border-r-[3px] border-cyan-400 rounded-tr-lg" />
+                              <div className="absolute bottom-0 left-0 w-6 h-6 border-b-[3px] border-l-[3px] border-cyan-400 rounded-bl-lg" />
+                              <div className="absolute bottom-0 right-0 w-6 h-6 border-b-[3px] border-r-[3px] border-cyan-400 rounded-br-lg" />
+                              <div className="w-[calc(100%-8px)] h-0.5 left-1 bg-gradient-to-r from-transparent via-cyan-400 to-transparent shadow-[0_0_12px_rgba(34,211,238,0.7)] absolute animate-qr-scan-line" />
+                            </div>
+                          </div>
+                        </div>
+
+                        {availableCameras.length > 1 && (
+                          <div className="flex items-center justify-between gap-2 px-3 py-2 bg-gray-900/60 border-t border-gray-700 text-[11px]">
+                            <span className="text-gray-400 font-medium flex items-center gap-1.5">
+                              <CameraIcon className="w-3.5 h-3.5 text-cyan-400" />
+                              Seleccionar lente:
+                            </span>
+                            <select
+                              value={selectedCameraId}
+                              onChange={(e) => void handleChangeCamera(e.target.value)}
+                              className="bg-gray-800 text-gray-200 border border-gray-600 rounded-md px-2 py-1 text-[11px] focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/40"
+                            >
+                              <option value="">Automática (por defecto)</option>
+                              {availableCameras.map((cam) => (
+                                <option key={cam.id} value={cam.id}>
+                                  {cam.label}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {transferReady ? (
+                      multi && receivedChunks[activeTransferId].totalChunks > 1 ? (
+                        <div className="flex items-start gap-3 text-sm rounded-md border border-green-500/20 bg-green-500/5 px-4 py-3">
+                          <div className="text-green-400 text-xl leading-none mt-0.5">✓</div>
+                          <div className="min-w-0 flex-1">
+                            <p className="text-gray-100 font-medium">Transferencia completa</p>
+                            <p className="text-gray-500 truncate mt-0.5">
+                              {Object.keys(receivedChunks[activeTransferId].chunks).length} QR de{' '}
+                              {receivedChunks[activeTransferId].totalChunks} listos para descifrar.
+                            </p>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-start gap-3 text-sm rounded-md border border-green-500/20 bg-green-500/5 px-4 py-3">
+                          <div className="text-green-400 text-xl leading-none mt-0.5">✓</div>
+                          <div className="min-w-0 flex-1">
+                            <p className="text-gray-100 font-medium">QR leído correctamente</p>
+                            {selectedImageName && (
+                              <p className="text-gray-500 truncate mt-0.5">{selectedImageName}</p>
+                            )}
+                          </div>
+                        </div>
+                      )
+                    ) : scanSource === 'image' ? (
+                      <p className="text-sm text-gray-500 text-center italic px-3 pt-1">
+                        {partialMulti
+                          ? `Carga el siguiente QR que falte (${receivedChunks[activeTransferId!].totalChunks -
+                          Object.keys(receivedChunks[activeTransferId!].chunks).length
+                          } restantes).`
+                          : loadedAny
+                            ? 'Carga otra imagen QR para reemplazar la lectura anterior.'
+                            : 'Selecciona una imagen PNG/JPG para empezar la lectura del QR.'}
+                      </p>
+                    ) : !scanSource ? (
+                      <p className="text-sm text-gray-500 text-center italic px-3 pt-1">
+                        Pulsa una de las dos opciones anteriores para obtener el QR.
+                      </p>
+                    ) : null}
+
+                    {scanSource && (
+                      <div className="flex justify-center pt-1">
+                        <button
+                          onClick={() => void handleRestartQRScan()}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-gray-700/60 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-600/40"
+                        >
+                          ↺ Reiniciar lectura QR
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              }
+
+              if (scanQRStep === 2) {
+                return (
+                  <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3 sm:space-y-4">
+                    <div>
+                      <p className="text-sm font-semibold text-gray-200">
+                        Paso 2 — Patrón de desbloqueo
+                      </p>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        {multi
+                          ? `Dibuja el patrón del dispositivo que envió los ${receivedChunks[activeTransferId!].totalChunks} QR.`
+                          : 'Dibuja el patrón de desbloqueo del dispositivo que envió el QR.'}
+                      </p>
+                    </div>
+
+                    <div className="rounded-md border border-gray-700 bg-gray-800/40 p-4 space-y-2">
+                      <div className="flex justify-center">
+                        <GesturePad
+                          onPatternComplete={(p) => setQrImportPattern(p)}
+                          minPoints={4}
+                          resetKey={qrImportPatternReset}
+                        />
+                      </div>
+                      <div className="flex flex-col items-center gap-1 min-h-[40px]">
+                        {qrImportPattern && qrImportPattern.length >= 4 ? (
+                          <p className="text-xs text-green-400">
+                            ✓ Patrón listo. Pulsa "Siguiente" para descifrar.
+                          </p>
+                        ) : qrImportPattern ? (
+                          <p className="text-xs text-amber-400/90">
+                            El patrón debe tener al menos 4 puntos.
+                          </p>
+                        ) : null}
+                      </div>
+                      {qrImportPattern && (
+                        <div className="flex justify-center pt-1">
+                          <button
+                            onClick={() => {
+                              setQrImportPattern(null);
+                              setQrImportPatternReset((k) => k + 1);
+                              setSuccess('');
+                            }}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-gray-700/60 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-600/40"
+                          >
+                            ↺ Reiniciar patrón
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              }
+
+              return (
+                <div className="space-y-4">
+                  <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3">
+                    <div className="flex items-baseline justify-between gap-2 flex-wrap">
+                      <div>
+                        <p className="text-sm font-semibold text-gray-200">
+                          Paso 3 — Confirma la importación
                         </p>
                         <p className="text-xs text-gray-500 mt-0.5">
                           Elige cómo integrar estas contraseñas en tu bóveda local.
                         </p>
                       </div>
                       <span className="text-xs font-semibold text-gray-500">
-                        {previewImportedPasswords?.length ?? 0} contraseñas
+                        {scannedPasswords.length} contraseñas
                       </span>
                     </div>
 
                     <div className="space-y-2">
                       <label
-                        className={`flex items-start gap-3 p-3 rounded-md border transition-colors cursor-pointer ${
-                          importMode === 'merge'
+                        className={`flex items-start gap-3 p-3 rounded-md border transition-colors cursor-pointer ${importMode === 'merge'
                             ? 'border-cyan-500/60 bg-cyan-500/5'
                             : 'border-gray-600 bg-gray-800/40 hover:border-gray-500'
-                        }`}
+                          }`}
                       >
                         <input
                           type="radio"
@@ -2287,16 +3233,15 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
                             Agregar a las existentes
                           </p>
                           <p className="text-xs text-gray-500 mt-0.5">
-                            Fusiona las nuevas contraseñas con las actuales. Se actualizarán aquellas con el mismo sitio y usuario.
+                            Fusiona las nuevas contraseñas con las actuales.
                           </p>
                         </div>
                       </label>
                       <label
-                        className={`flex items-start gap-3 p-3 rounded-md border transition-colors cursor-pointer ${
-                          importMode === 'overwrite'
+                        className={`flex items-start gap-3 p-3 rounded-md border transition-colors cursor-pointer ${importMode === 'overwrite'
                             ? 'border-cyan-500/60 bg-cyan-500/5'
                             : 'border-gray-600 bg-gray-800/40 hover:border-gray-500'
-                        }`}
+                          }`}
                       >
                         <input
                           type="radio"
@@ -2308,7 +3253,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
                         <div className="min-w-0">
                           <p className="text-sm font-medium text-gray-200">Reemplazar todas</p>
                           <p className="text-xs text-gray-500 mt-0.5">
-                            Elimina las contraseñas actuales y deja solo las del archivo. Esta acción no se puede deshacer.
+                            Elimina las contraseñas actuales y deja solo las recibidas.
                           </p>
                         </div>
                       </label>
@@ -2319,7 +3264,7 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
                         Vista previa
                       </p>
                       <div className="max-h-[240px] overflow-y-auto space-y-2 pr-1">
-                        {previewImportedPasswords?.map((entry) => (
+                        {scannedPasswords.map((entry) => (
                           <div
                             key={entry.id}
                             className="p-3 rounded-md bg-gray-800 border border-gray-700"
@@ -2329,972 +3274,52 @@ const ImportExportModal: React.FC<ImportExportModalProps> = ({
                             <p className="text-xs text-gray-500 mt-1 truncate">{entry.category}</p>
                           </div>
                         ))}
-                        {(!previewImportedPasswords || previewImportedPasswords.length === 0) && (
-                          <p className="text-sm text-gray-500 italic text-center py-4">
-                            No hay contraseñas para mostrar.
-                          </p>
-                        )}
                       </div>
                     </div>
                   </div>
-                );
-              })()}
-            </div>
-
-            {error && <p className="text-red-400 text-sm pl-1">{error}</p>}
-            {success && importStep !== 1 && (
-              <p className="text-green-400 text-sm pl-1">{success}</p>
-            )}
-
-            <div className="flex justify-between gap-3 pt-2">
-              <button
-                onClick={handleImportBack}
-                className="px-4 py-2 rounded-md bg-gray-600 hover:bg-gray-500 transition-colors min-w-[120px]"
-              >
-                Atrás
-              </button>
-              {(() => {
-                const nextDisabled =
-                  (importStep === 1 && !selectedFile) ||
-                  (importStep === 2 && (!importPattern || importPattern.length < 4)) ||
-                  (importStep === 3 && (!previewImportedPasswords || previewImportedPasswords.length === 0));
-                return (
-                  <button
-                    onClick={() => void handleImportNext()}
-                    disabled={nextDisabled}
-                    className="px-5 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold disabled:opacity-50 disabled:cursor-not-allowed min-w-[200px]"
-                  >
-                    {importStep === 3 ? 'Restaurar respaldo' : 'Siguiente'}
-                  </button>
-                );
-              })()}
-            </div>
-          </div>
-        )}
-
-        {mode === 'shareQR' && (
-          <div className="space-y-3.5 sm:space-y-5">
-            <div className="space-y-1">
-              <p className="text-gray-400 text-sm">
-                Transfiere contraseñas cifradas a otro dispositivo siguiendo este flujo guiado.
-              </p>
-            </div>
-
-            <div className="pt-0.5 pb-1.5 sm:pt-1 sm:pb-2">
-              <div className="max-w-[420px] mx-auto">
-                <div className="flex items-start justify-between px-0.5 sm:px-1">
-                  <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
-                    <div
-                      className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${
-                        shareQRStep > 1
-                          ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
-                          : shareQRStep === 1
-                          ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
-                          : 'bg-gray-800 border-gray-600 text-gray-500'
-                      }`}
-                    >
-                      {shareQRStep > 1 ? '✓' : '1'}
-                    </div>
-                    <div className="text-center">
-                      <p
-                        className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${
-                          shareQRStep >= 1 ? 'text-gray-200' : 'text-gray-500'
-                        }`}
-                      >
-                        Seleccionar
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex-1 flex items-center pt-3 sm:pt-4 mx-0.5 sm:mx-1">
-                    <div
-                      className={`h-0.5 w-full rounded-full transition-colors ${
-                        shareQRStep > 1 ? 'bg-cyan-500' : 'bg-gray-700'
-                      }`}
-                    />
-                  </div>
-
-                  <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
-                    <div
-                      className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${
-                        shareQRStep > 2
-                          ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
-                          : shareQRStep === 2
-                          ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
-                          : 'bg-gray-800 border-gray-600 text-gray-500'
-                      }`}
-                    >
-                      {shareQRStep > 2 ? '✓' : '2'}
-                    </div>
-                    <div className="text-center">
-                      <p
-                        className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${
-                          shareQRStep >= 2 ? 'text-gray-200' : 'text-gray-500'
-                        }`}
-                      >
-                        Patrón
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex-1 flex items-center pt-3 sm:pt-4 mx-0.5 sm:mx-1">
-                    <div
-                      className={`h-0.5 w-full rounded-full transition-colors ${
-                        shareQRStep > 2 ? 'bg-cyan-500' : 'bg-gray-700'
-                      }`}
-                    />
-                  </div>
-
-                  <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
-                    <div
-                      className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${
-                        shareQRStep >= 3
-                          ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
-                          : 'bg-gray-800 border-gray-600 text-gray-500'
-                      }`}
-                    >
-                      3
-                    </div>
-                    <div className="text-center">
-                      <p
-                        className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${
-                          shareQRStep >= 3 ? 'text-gray-200' : 'text-gray-500'
-                        }`}
-                      >
-                        QR
-                      </p>
-                    </div>
-                  </div>
                 </div>
-              </div>
-            </div>
+              );
+            })()}
+          </div>
 
-            <div
-              key={shareQRAnimKey}
-              className="animate-in fade-in zoom-in-[99%] duration-200 ease-out"
+          {error && <p className="text-red-400 text-sm pl-1">{error}</p>}
+          {success &&
+            scanQRStep === 1 &&
+            !pendingQRPayload &&
+            !activeTransferId && <p className="text-green-400 text-sm pl-1">{success}</p>}
+
+          <div className="flex justify-between gap-3 pt-2">
+            <button
+              onClick={handleScanQRBack}
+              className="px-4 py-2 rounded-md bg-gray-600 hover:bg-gray-500 transition-colors min-w-[120px]"
             >
-              {shareQRStep === 1 && (
-                <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4">
-                  <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-                    <div>
-                      <p className="text-sm font-semibold text-gray-200">
-                        Paso 1 — Selecciona las contraseñas
-                      </p>
-                      <p className="text-xs text-gray-500 mt-0.5">
-                        Elige qué entradas quieres transferir al otro dispositivo.
-                      </p>
-                    </div>
-                    <div className="flex flex-col items-end gap-1">
-                      <span className="text-xs font-semibold text-gray-500 px-2 py-0.5 rounded-md bg-gray-800/70 border border-gray-700/60">
-                        {selectedPasswordIds.length} / {passwords.length}
-                      </span>
-                      {(() => {
-                        if (selectedPasswordIds.length === 0) return null;
-                        const selected = passwords.filter((p) => selectedPasswordIds.includes(p.id));
-                        const rough = roughEstimateQRChunks(sanitizePasswordsForQR(selected));
-                        const exact = qrSharePattern
-                          ? estimateQRChunksNeeded(
-                              { passwords: sanitizePasswordsForQR(selected) },
-                              patternToString(qrSharePattern)
-                            )
-                          : null;
-                        const count = exact ?? rough;
-                        return (
-                          <span className="text-xs font-semibold px-2 py-0.5 rounded-md bg-cyan-500/15 border border-cyan-500/30 text-cyan-300">
-                            ~{count} QR{count > 1 ? 's' : ''} necesario{count > 1 ? 's' : ''}
-                          </span>
-                        );
-                      })()}
-                    </div>
-                  </div>
-
-                  {passwords.length === 0 ? (
-                    <div className="p-4 rounded-md border border-gray-700 bg-gray-800/60 text-gray-400 text-center">
-                      No hay contraseñas disponibles para enviar.
-                    </div>
-                  ) : (
-                    <div className="max-h-[360px] overflow-y-auto space-y-2 pr-1">
-                      {passwords.map((entry) => {
-                        const isSelected = selectedPasswordIds.includes(entry.id);
-                        return (
-                          <button
-                            key={entry.id}
-                            type="button"
-                            onClick={() => togglePasswordSelection(entry.id)}
-                            className={`w-full text-left p-3 rounded-md border transition-colors ${
-                              isSelected
-                                ? 'border-cyan-500/60 bg-cyan-500/10'
-                                : 'border-gray-700 bg-gray-800/50 hover:bg-gray-700/40'
-                            }`}
-                          >
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="min-w-0">
-                                <p className="font-semibold text-cyan-400 truncate">{entry.site}</p>
-                                <p className="text-sm text-gray-300 truncate">{entry.username}</p>
-                                <p className="text-xs text-gray-500 mt-1 truncate">{entry.category}</p>
-                              </div>
-                              <div className={`mt-0.5 h-5 w-5 flex-shrink-0 rounded border flex items-center justify-center ${
-                                isSelected ? 'border-cyan-400 bg-cyan-500/25' : 'border-gray-500'
-                              }`}>
-                                {isSelected && <span className="text-cyan-200 text-xs font-bold">✓</span>}
-                              </div>
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                  {passwords.length > 0 && (
-                    <div className="flex items-center justify-between pt-3 mt-3 border-t border-gray-700/60">
-                      <button
-                        onClick={() => setSelectedPasswordIds(passwords.map(p => p.id))}
-                        className="text-xs text-cyan-400 hover:text-cyan-300 transition-colors"
-                      >
-                        Seleccionar todas
-                      </button>
-                      <button
-                        onClick={() => setSelectedPasswordIds([])}
-                        disabled={selectedPasswordIds.length === 0}
-                        className="text-xs text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        Limpiar selección
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {shareQRStep === 2 && (
-                <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3">
-                  <div>
-                    <p className="text-sm font-semibold text-gray-200">
-                      Paso 2 — Patrón de desbloqueo de este dispositivo
-                    </p>
-                    <p className="text-xs text-gray-500 mt-0.5">
-                      Dibuja el patrón que usas para abrir SecurePass aquí. Servirá para cifrar el contenido del QR.
-                    </p>
-                  </div>
-                  <div className="flex justify-center pt-2">
-                    <GesturePad
-                      onPatternComplete={(p) => {
-                        setQrSharePattern(p);
-                        setError('');
-                      }}
-                      minPoints={4}
-                      resetKey={qrSharePatternReset}
-                    />
-                  </div>
-                  <div className="flex flex-col items-center gap-1 min-h-[44px]">
-                    {qrSharePattern && (
-                      <p className="text-xs text-green-400">✓ Patrón listo para cifrar.</p>
-                    )}
-                    {qrSharePattern && (
-                      <button
-                        onClick={() => {
-                          setQrSharePattern(null);
-                          setQrSharePatternReset((k) => k + 1);
-                          setGeneratedQRData('');
-                        }}
-                        className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-gray-700/60 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-600/40"
-                      >
-                        ↺ Reiniciar patrón
-                      </button>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {shareQRStep === 3 && (
-                <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3 sm:space-y-4">
-                  <div className="flex items-center justify-between gap-3 flex-wrap">
-                    <div>
-                      <p className="text-sm font-semibold text-gray-200">
-                        Paso 3 — Transferencia en curso
-                      </p>
-                      <p className="text-xs text-gray-500 mt-0.5">
-                        {generatedQRChunks.length > 1
-                          ? 'Muestra todos los códigos QR al otro dispositivo. Puedes navegar con las flechas.'
-                          : 'Muéstraselo al otro dispositivo o guárdalo como imagen.'}
-                      </p>
-                    </div>
-                    {generatedQRChunks.length > 1 && (
-                      <div className="flex flex-col items-end gap-1">
-                        <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-cyan-500/15 border border-cyan-500/30 text-cyan-300">
-                          QR {currentQRChunkIndex + 1} / {generatedQRChunks.length}
-                        </span>
-                      </div>
-                    )}
-                  </div>
-
-                  {generatedQRChunks.length > 1 && (
-                    <div className="h-1.5 w-full bg-gray-800 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-gradient-to-r from-cyan-500 to-cyan-400 transition-[width] duration-200"
-                        style={{
-                          width: `${((currentQRChunkIndex + 1) / generatedQRChunks.length) * 100}%`
-                        }}
-                      />
-                    </div>
-                  )}
-
-                  <div className="flex flex-col items-center justify-center text-center py-1">
-                    {generatedQRData ? (
-                      <div className="flex flex-col items-center gap-3">
-                        <div className="bg-white p-3 rounded-lg shadow-lg">
-                          <div ref={qrCodeContainerRef}>
-                            <QRCode value={generatedQRData} size={300} level="Q" />
-                          </div>
-                        </div>
-                        <div className="flex flex-col items-center gap-2">
-                          <button
-                            onClick={() => void handleSaveQRImage()}
-                            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-gray-700 hover:bg-gray-600 transition-colors text-sm border border-gray-600"
-                          >
-                            💾 Guardar como imagen PNG
-                          </button>
-                          <p className="text-xs text-gray-500 max-w-[320px]">
-                            El otro dispositivo necesitará el patrón de desbloqueo de este dispositivo para descifrarlo.
-                          </p>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="flex flex-col items-center gap-2 text-gray-500 px-2">
-                        <div className="w-20 h-20 rounded-lg border-2 border-dashed border-gray-600 flex items-center justify-center text-3xl opacity-50">
-                          ⬚
-                        </div>
-                        <p className="text-sm">
-                          Generando QR cifrado…
-                        </p>
-                      </div>
-                    )}
-                  </div>
-
-                  {generatedQRChunks.length > 1 && (
-                    <div className="flex items-center justify-between gap-3 pt-2 border-t border-gray-700/60">
-                      <button
-                        onClick={() => {
-                          setCurrentQRChunkIndex((prev) => {
-                            const next = Math.max(0, prev - 1);
-                            setGeneratedQRData(generatedQRChunks[next] || '');
-                            return next;
-                          });
-                        }}
-                        disabled={currentQRChunkIndex === 0}
-                        className="inline-flex items-center gap-1 px-3 py-2 rounded-md bg-gray-700/70 hover:bg-gray-700 text-sm text-gray-200 border border-gray-600/50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                      >
-                        ← Anterior
-                      </button>
-                      <p className="text-xs text-gray-500 font-medium">
-                        Puede escanearse en cualquier orden
-                      </p>
-                      <button
-                        onClick={() => {
-                          setCurrentQRChunkIndex((prev) => {
-                            const next = Math.min(generatedQRChunks.length - 1, prev + 1);
-                            setGeneratedQRData(generatedQRChunks[next] || '');
-                            return next;
-                          });
-                        }}
-                        disabled={currentQRChunkIndex >= generatedQRChunks.length - 1}
-                        className="inline-flex items-center gap-1 px-3 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 text-sm text-white font-semibold disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                      >
-                        Siguiente →
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {error && <p className="text-red-400 text-sm pl-1">{error}</p>}
-            {success && <p className="text-green-400 text-sm pl-1">{success}</p>}
-
-            <div className="flex justify-between gap-3 pt-2">
-              <button
-                onClick={async () => {
-                  setError('');
-                  if (shareQRStep === 1) {
-                    await changeMode('select');
-                    return;
-                  }
-                  const next = (shareQRStep - 1) as 1 | 2 | 3;
-                  setShareQRStep(next);
-                  setShareQRAnimKey((k) => k + 1);
-                  if (next === 2) {
-                    setGeneratedQRData('');
-                    setGeneratedQRChunks([]);
-                    setCurrentQRChunkIndex(0);
-                  }
-                }}
-                className="px-4 py-2 rounded-md bg-gray-600 hover:bg-gray-500 transition-colors min-w-[120px]"
-              >
-                Atrás
-              </button>
-
-              {shareQRStep < 3 ? (
+              Atrás
+            </button>
+            {(() => {
+              const readySingle = !!pendingQRPayload;
+              const multi = !!activeTransferId && !!receivedChunks[activeTransferId];
+              const readyMulti =
+                multi &&
+                Object.keys(receivedChunks[activeTransferId].chunks).length ===
+                receivedChunks[activeTransferId].totalChunks;
+              const transferReady = readySingle || readyMulti;
+              const nextDisabled =
+                (scanQRStep === 1 && !transferReady) ||
+                (scanQRStep === 2 && (!qrImportPattern || qrImportPattern.length < 4)) ||
+                (scanQRStep === 3 && scannedPasswords.length === 0);
+              return (
                 <button
-                  onClick={async () => {
-                    setError('');
-                    if (shareQRStep === 1) {
-                      if (selectedPasswordIds.length === 0) {
-                        setError('Selecciona al menos una contraseña para continuar.');
-                        return;
-                      }
-                      setShareQRStep(2);
-                      setShareQRAnimKey((k) => k + 1);
-                      return;
-                    }
-                    if (shareQRStep === 2) {
-                      if (!qrSharePattern) {
-                        setError('Dibuja tu patrón de desbloqueo para continuar.');
-                        return;
-                      }
-                      const ok = handleGenerateQR();
-                      if (ok) {
-                        setShareQRStep(3);
-                        setShareQRAnimKey((k) => k + 1);
-                      }
-                    }
-                  }}
-                  disabled={
-                    (shareQRStep === 1 && selectedPasswordIds.length === 0) ||
-                    (shareQRStep === 2 && !qrSharePattern)
-                  }
-                  className="px-5 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold disabled:opacity-50 disabled:cursor-not-allowed min-w-[160px]"
+                  onClick={() => void handleScanQRNext()}
+                  disabled={nextDisabled}
+                  className="px-5 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold disabled:opacity-50 disabled:cursor-not-allowed min-w-[200px]"
                 >
-                  Continuar
+                  {scanQRStep === 3 ? 'Recibir contraseñas' : 'Siguiente'}
                 </button>
-              ) : (
-                <button
-                  onClick={() => void handleClose()}
-                  className="px-5 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold min-w-[160px]"
-                >
-                  Finalizar
-                </button>
-              )}
-            </div>
+              );
+            })()}
           </div>
-        )}
-
-        {mode === 'scanQR' && (
-          <div className="space-y-3 sm:space-y-4">
-            <p className="text-gray-400 text-sm">
-              Recibe contraseñas desde otro dispositivo usando la cámara o una imagen QR. Si la transferencia usa varios códigos, escanéalos todos.
-            </p>
-
-            <div className="max-w-[420px] mx-auto">
-              <div className="flex items-start justify-between px-0.5 sm:px-1">
-                <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
-                  <div
-                    className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${
-                      scanQRStep > 1
-                        ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
-                        : scanQRStep === 1
-                        ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
-                        : 'bg-gray-800 border-gray-600 text-gray-500'
-                    }`}
-                  >
-                    {scanQRStep > 1 ? '✓' : '1'}
-                  </div>
-                  <div className="text-center">
-                    <p
-                      className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${
-                        scanQRStep >= 1 ? 'text-gray-200' : 'text-gray-500'
-                      }`}
-                    >
-                      Escanear
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex-1 flex items-center pt-3 sm:pt-4 mx-0.5 sm:mx-1">
-                  <div
-                    className={`h-0.5 w-full rounded-full transition-colors ${
-                      scanQRStep > 1 ? 'bg-cyan-500' : 'bg-gray-700'
-                    }`}
-                  />
-                </div>
-
-                <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
-                  <div
-                    className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${
-                      scanQRStep > 2
-                        ? 'bg-cyan-600 border-cyan-500 text-white shadow-[0_0_0_2px_rgba(168,85,247,0.15)]'
-                        : scanQRStep === 2
-                        ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
-                        : 'bg-gray-800 border-gray-600 text-gray-500'
-                    }`}
-                  >
-                    {scanQRStep > 2 ? '✓' : '2'}
-                  </div>
-                  <div className="text-center">
-                    <p
-                      className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${
-                        scanQRStep >= 2 ? 'text-gray-200' : 'text-gray-500'
-                      }`}
-                    >
-                      Patrón
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex-1 flex items-center pt-3 sm:pt-4 mx-0.5 sm:mx-1">
-                  <div
-                    className={`h-0.5 w-full rounded-full transition-colors ${
-                      scanQRStep > 2 ? 'bg-cyan-500' : 'bg-gray-700'
-                    }`}
-                  />
-                </div>
-
-                <div className="flex flex-col items-center gap-1 sm:gap-2 flex-1">
-                  <div
-                    className={`relative z-10 w-8 h-8 sm:w-9 sm:h-9 rounded-full flex items-center justify-center text-xs sm:text-sm font-bold border-2 transition-colors ${
-                      scanQRStep >= 3
-                        ? 'bg-cyan-600 border-cyan-400 text-white ring-4 ring-cyan-500/20'
-                        : 'bg-gray-800 border-gray-600 text-gray-500'
-                    }`}
-                  >
-                    3
-                  </div>
-                  <div className="text-center">
-                    <p
-                      className={`text-[10px] sm:text-[11px] font-semibold leading-tight ${
-                        scanQRStep >= 3 ? 'text-gray-200' : 'text-gray-500'
-                      }`}
-                    >
-                      Confirmar
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div
-              key={scanQRAnimKey}
-              className="animate-in fade-in zoom-in-[99%] duration-200 ease-out"
-            >
-              {(() => {
-                const readySingle = !!pendingQRPayload;
-                const multi = !!activeTransferId && !!receivedChunks[activeTransferId];
-                const readyMulti =
-                  multi &&
-                  Object.keys(receivedChunks[activeTransferId].chunks).length ===
-                    receivedChunks[activeTransferId].totalChunks;
-                const transferReady = readySingle || readyMulti;
-
-                if (scanQRStep === 1) {
-                  const partialMulti =
-                    multi &&
-                    Object.keys(receivedChunks[activeTransferId].chunks).length <
-                      receivedChunks[activeTransferId].totalChunks;
-                  const loadedAny = readySingle || multi;
-                  const imageBtnLabel = partialMulti
-                    ? 'Cargar siguiente imagen QR'
-                    : readySingle
-                    ? 'Cargar otra imagen QR'
-                    : 'Cargar imagen QR';
-
-                  return (
-                    <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3 sm:space-y-4">
-                      <div className="flex items-center justify-between flex-wrap gap-2">
-                        <div>
-                          <p className="text-sm font-semibold text-gray-200">
-                            Paso 1 — Obtén los QR
-                          </p>
-                          <p className="text-xs text-gray-500 mt-0.5">
-                            Usa la cámara del dispositivo o carga una imagen PNG/JPG.
-                          </p>
-                        </div>
-                        {multi && (
-                          <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-cyan-500/15 border border-cyan-500/30 text-cyan-300">
-                            {Object.keys(receivedChunks[activeTransferId].chunks).length} /{' '}
-                            {receivedChunks[activeTransferId].totalChunks}
-                          </span>
-                        )}
-                      </div>
-
-                      {multi && (
-                        <div className="space-y-2">
-                          <div className="h-1.5 w-full bg-gray-800 rounded-full overflow-hidden">
-                            <div
-                              className="h-full bg-gradient-to-r from-cyan-500 to-cyan-400 transition-[width] duration-200"
-                              style={{
-                                width: `${(Object.keys(
-                                  receivedChunks[activeTransferId].chunks
-                                ).length /
-                                  receivedChunks[activeTransferId].totalChunks) *
-                                  100}%`
-                              }}
-                            />
-                          </div>
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            {Array.from(
-                              { length: receivedChunks[activeTransferId].totalChunks },
-                              (_, i) => i + 1
-                            ).map((chunkIndex) => {
-                              const done = !!receivedChunks[activeTransferId].chunks[chunkIndex];
-                              return (
-                                <div
-                                  key={chunkIndex}
-                                  className={`w-6 h-6 rounded-md flex items-center justify-center text-[10px] font-bold border transition-colors ${
-                                    done
-                                      ? 'bg-cyan-500/30 border-cyan-500/60 text-cyan-200'
-                                      : 'bg-gray-800 border-gray-600 text-gray-500'
-                                  }`}
-                                >
-                                  {done ? '✓' : chunkIndex}
-                                </div>
-                              );
-                            })}
-                          </div>
-                          <p className="text-[11px] text-gray-500 pl-0.5">
-                            Transferencia #{activeTransferId}
-                          </p>
-                        </div>
-                      )}
-
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <button
-                          onClick={() => void handleStartCameraScan()}
-                          className="w-full px-4 py-2.5 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold text-sm"
-                        >
-                          Usar cámara
-                        </button>
-                        <button
-                          onClick={handleImageFileSelect}
-                          className="w-full px-4 py-2.5 rounded-md bg-gray-600 hover:bg-gray-500 transition-colors font-semibold text-sm"
-                        >
-                          {imageBtnLabel}
-                        </button>
-                      </div>
-
-                      <input
-                        ref={imageFileInputRef}
-                        type="file"
-                        accept=".png,.jpg,.jpeg,image/png,image/jpeg"
-                        onChange={(e) => void handleImageSelection(e.target.files?.[0] || null)}
-                        className="hidden"
-                      />
-
-                      {scanSource === 'camera' && !pendingQRPayload && (
-                        <div className="rounded-lg border border-gray-700 overflow-hidden space-y-2">
-                          {(hasTorch || availableCameras.length > 1) && (
-                            <div className="flex items-center justify-between gap-2 px-3 py-2 bg-gray-900/80 border-b border-gray-700">
-                              <div className="flex items-center gap-1.5">
-                                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                                <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">
-                                  Cámara activa
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-1.5">
-                                {hasTorch && (
-                                  <button
-                                    onClick={() => void toggleTorch()}
-                                    className={`p-1.5 rounded-md border text-[11px] font-medium flex items-center gap-1 transition-all ${
-                                      torchOn
-                                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 shadow-[0_0_12px_rgba(245,158,11,0.15)]'
-                                        : 'bg-gray-800 text-gray-300 border-gray-600 hover:bg-gray-700'
-                                    }`}
-                                    title={torchOn ? 'Apagar linterna' : 'Encender linterna'}
-                                  >
-                                    {torchOn ? (
-                                      <ZapIcon className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
-                                    ) : (
-                                      <ZapOffIcon className="w-3.5 h-3.5" />
-                                    )}
-                                    <span className="hidden sm:inline">
-                                      {torchOn ? 'Linterna On' : 'Linterna'}
-                                    </span>
-                                  </button>
-                                )}
-                                {availableCameras.length > 1 && (
-                                  <button
-                                    onClick={() => void handleToggleFrontBack()}
-                                    className="p-1.5 rounded-md border bg-gray-800 text-gray-300 border-gray-600 hover:bg-gray-700 transition-all flex items-center gap-1 text-[11px] font-medium"
-                                    title="Cambiar lente (frontal/trasera)"
-                                  >
-                                    <SwitchCameraIcon className="w-3.5 h-3.5 text-cyan-400" />
-                                    <span className="hidden sm:inline">Cambiar</span>
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          )}
-
-                          <div className="relative w-full bg-black">
-                            <div
-                              id={QR_READER_ELEMENT_ID}
-                              className="w-full min-h-[220px] sm:min-h-[260px] overflow-hidden bg-black"
-                            />
-                            <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-                              <div
-                                className="relative flex items-center justify-center animate-qr-reticle-pulse"
-                                style={{ width: '220px', height: '220px' }}
-                              >
-                                <div className="absolute inset-0 rounded-xl border border-cyan-400/40 shadow-[0_0_40px_rgba(34,211,238,0.15)]" />
-                                <div className="absolute top-0 left-0 w-6 h-6 border-t-[3px] border-l-[3px] border-cyan-400 rounded-tl-lg" />
-                                <div className="absolute top-0 right-0 w-6 h-6 border-t-[3px] border-r-[3px] border-cyan-400 rounded-tr-lg" />
-                                <div className="absolute bottom-0 left-0 w-6 h-6 border-b-[3px] border-l-[3px] border-cyan-400 rounded-bl-lg" />
-                                <div className="absolute bottom-0 right-0 w-6 h-6 border-b-[3px] border-r-[3px] border-cyan-400 rounded-br-lg" />
-                                <div className="w-[calc(100%-8px)] h-0.5 left-1 bg-gradient-to-r from-transparent via-cyan-400 to-transparent shadow-[0_0_12px_rgba(34,211,238,0.7)] absolute animate-qr-scan-line" />
-                              </div>
-                            </div>
-                          </div>
-
-                          {availableCameras.length > 1 && (
-                            <div className="flex items-center justify-between gap-2 px-3 py-2 bg-gray-900/60 border-t border-gray-700 text-[11px]">
-                              <span className="text-gray-400 font-medium flex items-center gap-1.5">
-                                <CameraIcon className="w-3.5 h-3.5 text-cyan-400" />
-                                Seleccionar lente:
-                              </span>
-                              <select
-                                value={selectedCameraId}
-                                onChange={(e) => void handleChangeCamera(e.target.value)}
-                                className="bg-gray-800 text-gray-200 border border-gray-600 rounded-md px-2 py-1 text-[11px] focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/40"
-                              >
-                                <option value="">Automática (por defecto)</option>
-                                {availableCameras.map((cam) => (
-                                  <option key={cam.id} value={cam.id}>
-                                    {cam.label}
-                                  </option>
-                                ))}
-                              </select>
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {transferReady ? (
-                        multi && receivedChunks[activeTransferId].totalChunks > 1 ? (
-                          <div className="flex items-start gap-3 text-sm rounded-md border border-green-500/20 bg-green-500/5 px-4 py-3">
-                            <div className="text-green-400 text-xl leading-none mt-0.5">✓</div>
-                            <div className="min-w-0 flex-1">
-                              <p className="text-gray-100 font-medium">Transferencia completa</p>
-                              <p className="text-gray-500 truncate mt-0.5">
-                                {Object.keys(receivedChunks[activeTransferId].chunks).length} QR de{' '}
-                                {receivedChunks[activeTransferId].totalChunks} listos para descifrar.
-                              </p>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="flex items-start gap-3 text-sm rounded-md border border-green-500/20 bg-green-500/5 px-4 py-3">
-                            <div className="text-green-400 text-xl leading-none mt-0.5">✓</div>
-                            <div className="min-w-0 flex-1">
-                              <p className="text-gray-100 font-medium">QR leído correctamente</p>
-                              {selectedImageName && (
-                                <p className="text-gray-500 truncate mt-0.5">{selectedImageName}</p>
-                              )}
-                            </div>
-                          </div>
-                        )
-                      ) : scanSource === 'image' ? (
-                        <p className="text-sm text-gray-500 text-center italic px-3 pt-1">
-                          {partialMulti
-                            ? `Carga el siguiente QR que falte (${
-                                receivedChunks[activeTransferId!].totalChunks -
-                                Object.keys(receivedChunks[activeTransferId!].chunks).length
-                              } restantes).`
-                            : loadedAny
-                            ? 'Carga otra imagen QR para reemplazar la lectura anterior.'
-                            : 'Selecciona una imagen PNG/JPG para empezar la lectura del QR.'}
-                        </p>
-                      ) : !scanSource ? (
-                        <p className="text-sm text-gray-500 text-center italic px-3 pt-1">
-                          Pulsa una de las dos opciones anteriores para obtener el QR.
-                        </p>
-                      ) : null}
-
-                      {scanSource && (
-                        <div className="flex justify-center pt-1">
-                          <button
-                            onClick={() => void handleRestartQRScan()}
-                            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-gray-700/60 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-600/40"
-                          >
-                            ↺ Reiniciar lectura QR
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  );
-                }
-
-                if (scanQRStep === 2) {
-                  return (
-                    <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3 sm:space-y-4">
-                      <div>
-                        <p className="text-sm font-semibold text-gray-200">
-                          Paso 2 — Patrón de desbloqueo
-                        </p>
-                        <p className="text-xs text-gray-500 mt-0.5">
-                          {multi
-                            ? `Dibuja el patrón del dispositivo que envió los ${receivedChunks[activeTransferId!].totalChunks} QR.`
-                            : 'Dibuja el patrón de desbloqueo del dispositivo que envió el QR.'}
-                        </p>
-                      </div>
-
-                      <div className="rounded-md border border-gray-700 bg-gray-800/40 p-4 space-y-2">
-                        <div className="flex justify-center">
-                          <GesturePad
-                            onPatternComplete={(p) => setQrImportPattern(p)}
-                            minPoints={4}
-                            resetKey={qrImportPatternReset}
-                          />
-                        </div>
-                        <div className="flex flex-col items-center gap-1 min-h-[40px]">
-                          {qrImportPattern && qrImportPattern.length >= 4 ? (
-                            <p className="text-xs text-green-400">
-                              ✓ Patrón listo. Pulsa "Siguiente" para descifrar.
-                            </p>
-                          ) : qrImportPattern ? (
-                            <p className="text-xs text-amber-400/90">
-                              El patrón debe tener al menos 4 puntos.
-                            </p>
-                          ) : null}
-                        </div>
-                        {qrImportPattern && (
-                          <div className="flex justify-center pt-1">
-                            <button
-                              onClick={() => {
-                                setQrImportPattern(null);
-                                setQrImportPatternReset((k) => k + 1);
-                                setSuccess('');
-                              }}
-                              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md bg-gray-700/60 hover:bg-gray-700 text-gray-300 transition-colors border border-gray-600/40"
-                            >
-                              ↺ Reiniciar patrón
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                }
-
-                return (
-                  <div className="space-y-4">
-                    <div className="rounded-lg border border-gray-700 bg-gray-900/60 p-3 sm:p-4 space-y-3">
-                      <div className="flex items-baseline justify-between gap-2 flex-wrap">
-                        <div>
-                          <p className="text-sm font-semibold text-gray-200">
-                            Paso 3 — Confirma la importación
-                          </p>
-                          <p className="text-xs text-gray-500 mt-0.5">
-                            Elige cómo integrar estas contraseñas en tu bóveda local.
-                          </p>
-                        </div>
-                        <span className="text-xs font-semibold text-gray-500">
-                          {scannedPasswords.length} contraseñas
-                        </span>
-                      </div>
-
-                      <div className="space-y-2">
-                        <label
-                          className={`flex items-start gap-3 p-3 rounded-md border transition-colors cursor-pointer ${
-                            importMode === 'merge'
-                              ? 'border-cyan-500/60 bg-cyan-500/5'
-                              : 'border-gray-600 bg-gray-800/40 hover:border-gray-500'
-                          }`}
-                        >
-                          <input
-                            type="radio"
-                            value="merge"
-                            checked={importMode === 'merge'}
-                            onChange={(e) => setImportMode(e.target.value as ImportMode)}
-                            className="mt-1 mr-1"
-                          />
-                          <div className="min-w-0">
-                            <p className="text-sm font-medium text-gray-200">
-                              Agregar a las existentes
-                            </p>
-                            <p className="text-xs text-gray-500 mt-0.5">
-                              Fusiona las nuevas contraseñas con las actuales.
-                            </p>
-                          </div>
-                        </label>
-                        <label
-                          className={`flex items-start gap-3 p-3 rounded-md border transition-colors cursor-pointer ${
-                            importMode === 'overwrite'
-                              ? 'border-cyan-500/60 bg-cyan-500/5'
-                              : 'border-gray-600 bg-gray-800/40 hover:border-gray-500'
-                          }`}
-                        >
-                          <input
-                            type="radio"
-                            value="overwrite"
-                            checked={importMode === 'overwrite'}
-                            onChange={(e) => setImportMode(e.target.value as ImportMode)}
-                            className="mt-1 mr-1"
-                          />
-                          <div className="min-w-0">
-                            <p className="text-sm font-medium text-gray-200">Reemplazar todas</p>
-                            <p className="text-xs text-gray-500 mt-0.5">
-                              Elimina las contraseñas actuales y deja solo las recibidas.
-                            </p>
-                          </div>
-                        </label>
-                      </div>
-
-                      <div className="rounded-md border border-gray-700 bg-gray-800/40 p-3">
-                        <p className="text-xs font-semibold text-gray-400 mb-2 uppercase tracking-wider">
-                          Vista previa
-                        </p>
-                        <div className="max-h-[240px] overflow-y-auto space-y-2 pr-1">
-                          {scannedPasswords.map((entry) => (
-                            <div
-                              key={entry.id}
-                              className="p-3 rounded-md bg-gray-800 border border-gray-700"
-                            >
-                              <p className="font-semibold text-cyan-400 truncate">{entry.site}</p>
-                              <p className="text-sm text-gray-300 truncate">{entry.username}</p>
-                              <p className="text-xs text-gray-500 mt-1 truncate">{entry.category}</p>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })()}
-            </div>
-
-            {error && <p className="text-red-400 text-sm pl-1">{error}</p>}
-            {success &&
-              scanQRStep === 1 &&
-              !pendingQRPayload &&
-              !activeTransferId && <p className="text-green-400 text-sm pl-1">{success}</p>}
-
-            <div className="flex justify-between gap-3 pt-2">
-              <button
-                onClick={handleScanQRBack}
-                className="px-4 py-2 rounded-md bg-gray-600 hover:bg-gray-500 transition-colors min-w-[120px]"
-              >
-                Atrás
-              </button>
-              {(() => {
-                const readySingle = !!pendingQRPayload;
-                const multi = !!activeTransferId && !!receivedChunks[activeTransferId];
-                const readyMulti =
-                  multi &&
-                  Object.keys(receivedChunks[activeTransferId].chunks).length ===
-                    receivedChunks[activeTransferId].totalChunks;
-                const transferReady = readySingle || readyMulti;
-                const nextDisabled =
-                  (scanQRStep === 1 && !transferReady) ||
-                  (scanQRStep === 2 && (!qrImportPattern || qrImportPattern.length < 4)) ||
-                  (scanQRStep === 3 && scannedPasswords.length === 0);
-                return (
-                  <button
-                    onClick={() => void handleScanQRNext()}
-                    disabled={nextDisabled}
-                    className="px-5 py-2 rounded-md bg-cyan-600 hover:bg-cyan-700 transition-colors font-semibold disabled:opacity-50 disabled:cursor-not-allowed min-w-[200px]"
-                  >
-                    {scanQRStep === 3 ? 'Recibir contraseñas' : 'Siguiente'}
-                  </button>
-                );
-              })()}
-            </div>
-          </div>
-        )}
+        </div>
+      )}
     </>
   );
 

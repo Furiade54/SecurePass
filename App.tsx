@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { PasswordEntry, MfaEntry } from './types';
-import { CopyIcon, CheckIcon, EyeIcon, EyeOffIcon, PlusIcon, LockClosedIcon, MenuIcon, XIcon, SparklesIcon, ExternalLinkIcon, ImportExportIcon, BellIcon, DotsVerticalIcon, PencilIcon, TrashIcon, ShieldCheckIcon } from './components/Icons';
+import { CopyIcon, CheckIcon, EyeIcon, EyeOffIcon, PlusIcon, LockClosedIcon, MenuIcon, XIcon, SparklesIcon, ExternalLinkIcon, ImportExportIcon, BellIcon, DotsVerticalIcon, PencilIcon, TrashIcon, ShieldCheckIcon, QrCodeIcon } from './components/Icons';
 import GestureUnlockScreen from './components/GestureUnlockScreen';
 import PasswordModal from './components/PasswordModal';
 import PasswordGeneratorModal from './components/PasswordGeneratorModal';
@@ -16,7 +16,12 @@ import { generateTotpSync, getTotpRemainingSeconds, formatTotpCode } from './uti
 
 // --- Child Components ---
 
-const PasswordItem: React.FC<{ entry: PasswordEntry; onEdit: (entry: PasswordEntry) => void; onDelete: (id: string) => void; }> = ({ entry, onEdit, onDelete }) => {
+const PasswordItem: React.FC<{
+    entry: PasswordEntry;
+    onEdit: (entry: PasswordEntry) => void;
+    onDelete: (id: string) => void;
+    onShareQR: (entry: PasswordEntry) => void;
+}> = ({ entry, onEdit, onDelete, onShareQR }) => {
     const [isRevealed, setIsRevealed] = useState(false);
     const [copied, setCopied] = useState<'username' | 'password' | 'mfa' | null>(null);
     const [menuOpen, setMenuOpen] = useState(false);
@@ -81,6 +86,11 @@ const PasswordItem: React.FC<{ entry: PasswordEntry; onEdit: (entry: PasswordEnt
         if (mfaCode) {
             handleCopy(mfaCode.replace(/\s+/g, ''), 'mfa');
         }
+        setMenuOpen(false);
+    };
+
+    const handleShareQR = () => {
+        onShareQR(entry);
         setMenuOpen(false);
     };
 
@@ -189,6 +199,15 @@ const PasswordItem: React.FC<{ entry: PasswordEntry; onEdit: (entry: PasswordEnt
                                     </button>
                                 </li>
                             )}
+                            <li>
+                                <button
+                                    onClick={handleShareQR}
+                                    className="flex w-full items-center gap-3 px-3 py-2 hover:bg-gray-700/60 transition-colors text-left text-cyan-300"
+                                >
+                                    <QrCodeIcon className="w-4 h-4 text-cyan-400" />
+                                    <span>Compartir por QR</span>
+                                </button>
+                            </li>
                             <li className="border-t border-gray-700/60 my-1" />
                             <li>
                                 <button
@@ -235,6 +254,8 @@ const App: React.FC = () => {
     const [isPasswordModalOpen, setIsPasswordModalOpen] = useState(false);
     const [isGeneratorModalOpen, setIsGeneratorModalOpen] = useState(false);
     const [isImportExportModalOpen, setIsImportExportModalOpen] = useState(false);
+    const [importExportInitialMode, setImportExportInitialMode] = useState<'select' | 'export' | 'import' | 'shareQR' | 'scanQR' | null>(null);
+    const [importExportInitialSelectedIds, setImportExportInitialSelectedIds] = useState<string[]>([]);
     const [isNotificationModalOpen, setIsNotificationModalOpen] = useState(false);
     const [isMfaModalOpen, setIsMfaModalOpen] = useState(false);
     const [editingEntry, setEditingEntry] = useState<PasswordEntry | null>(null);
@@ -545,8 +566,16 @@ const App: React.FC = () => {
     };
 
     const handleOpenImportExport = () => {
+        setImportExportInitialMode(null);
+        setImportExportInitialSelectedIds([]);
         setIsImportExportModalOpen(true);
         setIsSidebarOpen(false);
+    };
+
+    const handleSharePasswordQR = (entry: PasswordEntry) => {
+        setImportExportInitialMode('shareQR');
+        setImportExportInitialSelectedIds([entry.id]);
+        setIsImportExportModalOpen(true);
     };
 
     const handlePasswordGenerated = (password: string) => {
@@ -768,7 +797,12 @@ const App: React.FC = () => {
                                         const entry = filteredPasswords[index];
                                         return (
                                             <div style={style} key={entry.id}>
-                                                <PasswordItem entry={entry} onEdit={handleEdit} onDelete={handleDelete} />
+                                                <PasswordItem
+                                                    entry={entry}
+                                                    onEdit={handleEdit}
+                                                    onDelete={handleDelete}
+                                                    onShareQR={handleSharePasswordQR}
+                                                />
                                             </div>
                                         );
                                     }}
@@ -814,7 +848,13 @@ const App: React.FC = () => {
 
             <ImportExportModal
                 isOpen={isImportExportModalOpen}
-                onClose={() => setIsImportExportModalOpen(false)}
+                onClose={() => {
+                    setIsImportExportModalOpen(false);
+                    setImportExportInitialMode(null);
+                    setImportExportInitialSelectedIds([]);
+                }}
+                initialMode={importExportInitialMode}
+                initialSelectedPasswordIds={importExportInitialSelectedIds}
                 onImport={(importedPasswords: PasswordEntry[]) => {
                     const importMode = localStorage.getItem('vault_last_import_mode') as 'merge' | 'overwrite' || 'merge';
 
