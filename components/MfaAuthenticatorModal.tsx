@@ -18,7 +18,8 @@ import {
   getTotpRemainingSeconds,
   parseOtpAuthUri,
   formatTotpCode,
-  buildOtpAuthUri
+  buildOtpAuthUri,
+  parseMigrationPayload
 } from '../utils/totp';
 import QRCode from 'react-qr-code';
 import { Html5Qrcode } from 'html5-qrcode';
@@ -125,10 +126,62 @@ const MfaAuthenticatorModal: React.FC<MfaAuthenticatorModalProps> = ({
 
   // Process decoded QR text
   const processQrText = (qrText: string): boolean => {
+    const trimmed = qrText.trim();
+    if (trimmed.toLowerCase().startsWith('otpauth-migration://')) {
+      const migrationEntries = parseMigrationPayload(trimmed);
+      if (!migrationEntries || migrationEntries.length === 0) {
+        showNotification(
+          'No se encontraron cuentas válidas en el código de migración de Google Authenticator.',
+          true
+        );
+        return false;
+      }
+
+      let addedCount = 0;
+      let existsCount = 0;
+
+      for (const entry of migrationEntries) {
+        const exists = mfaEntries.some(
+          (e) =>
+            e.secret.replace(/\s+/g, '').toUpperCase() ===
+            entry.secret.replace(/\s+/g, '').toUpperCase()
+        );
+
+        if (exists) {
+          existsCount++;
+        } else {
+          onSaveMfaEntry({
+            issuer: entry.issuer || 'Google Authenticator',
+            account: entry.name || 'MFA',
+            secret: entry.secret,
+            algorithm: entry.algorithm,
+            digits: entry.digits,
+            period: 30
+          });
+          addedCount++;
+        }
+      }
+
+      if (addedCount > 0) {
+        showNotification(
+          `¡Se importaron ${addedCount} cuenta(s) exitosamente desde Google Authenticator!${
+            existsCount > 0 ? ` (${existsCount} ya existían)` : ''
+          }`
+        );
+        return true;
+      } else {
+        showNotification(
+          'Todas las cuentas del código de migración ya se encuentran registradas.',
+          true
+        );
+        return false;
+      }
+    }
+
     const parsed = parseOtpAuthUri(qrText);
     if (!parsed) {
       showNotification(
-        'El código QR no contiene un formato de autenticación válido (otpauth://). Asegúrate de escanear un código de Google Authenticator o Microsoft Authenticator.',
+        'El código QR no contiene un formato de autenticación válido (otpauth:// o otpauth-migration://). Asegúrate de escanear un código de Google Authenticator o Microsoft Authenticator.',
         true
       );
       return false;

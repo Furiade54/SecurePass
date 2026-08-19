@@ -280,3 +280,169 @@ export function formatTotpCode(code: string): string {
   }
   return code;
 }
+
+class ProtoReader {
+  pos = 0;
+  constructor(public buf: Uint8Array) {}
+
+  hasMore() {
+    return this.pos < this.buf.length;
+  }
+
+  readVarint(): number {
+    let val = 0;
+    let shift = 0;
+    while (this.pos < this.buf.length) {
+      const byte = this.buf[this.pos++];
+      val |= (byte & 0x7f) << shift;
+      if (!(byte & 0x80)) {
+        return val;
+      }
+      shift += 7;
+      if (shift > 31) {
+        // Just reading small numbers / tag, so this is fine
+      }
+    }
+    return val;
+  }
+
+  readBytes(): Uint8Array {
+    const len = this.readVarint();
+    const res = this.buf.subarray(this.pos, this.pos + len);
+    this.pos += len;
+    return res;
+  }
+
+  readString(): string {
+    const bytes = this.readBytes();
+    return new TextDecoder().decode(bytes);
+  }
+}
+
+function parseOtpParameters(buf: Uint8Array): MigrationOtp | null {
+  const reader = new ProtoReader(buf);
+  let secretBytes: Uint8Array | null = null;
+  let name = '';
+  let issuer = '';
+  let algorithm: 'SHA-1' | 'SHA-256' | 'SHA-512' = 'SHA-1';
+  let digits = 6;
+  let type: 'totp' | 'hotp' = 'totp';
+  let counter = 0;
+
+  while (reader.hasMore()) {
+    const key = reader.readVarint();
+    const tag = key >> 3;
+    const wireType = key & 0x07;
+
+    if (tag === 1 && wireType === 2) {
+      secretBytes = reader.readBytes();
+    } else if (tag === 2 && wireType === 2) {
+      name = reader.readString();
+    } else if (tag === 3 && wireType === 2) {
+      issuer = reader.readString();
+    } else if (tag === 4 && wireType === 0) {
+      const val = reader.readVarint();
+      if (val === 2) algorithm = 'SHA-256';
+      else if (val === 3) algorithm = 'SHA-512';
+      else algorithm = 'SHA-1';
+    } else if (tag === 5 && wireType === 0) {
+      const val = reader.readVarint();
+      digits = val === 2 ? 8 : 6;
+    } else if (tag === 6 && wireType === 0) {
+      const val = reader.readVarint();
+      type = val === 1 ? 'hotp' : 'totp';
+    } else if (tag === 7 && wireType === 0) {
+      counter = reader.readVarint();
+    } else {
+      if (wireType === 0) {
+        reader.readVarint();
+      } else if (wireType === 2) {
+        reader.readBytes();
+      } else if (wireType === 1) {
+        reader.pos += 8;
+      } else if (wireType === 5) {
+        reader.pos += 4;
+      } else {
+        return null;
+      }
+    }
+  }
+
+  if (!secretBytes) return null;
+  const secret = bytesToBase32(secretBytes);
+  return {
+    secret,
+    name,
+    issuer: issuer || name || 'Servicio',
+    algorithm,
+    digits,
+    type,
+    counter
+  };
+}
+
+export interface MigrationOtp {
+  secret: string;
+  name: string;
+  issuer: string;
+  algorithm: 'SHA-1' | 'SHA-256' | 'SHA-512';
+  digits: number;
+  type: 'totp' | 'hotp';
+  counter: number;
+}
+
+export function parseMigrationPayload(uri: string): MigrationOtp[] | null {
+  try {
+    const trimmed = uri.trim();
+    if (!trimmed.toLowerCase().startsWith('otpauth-migration://')) {
+      return null;
+    }
+    const url = new URL(trimmed);
+    const dataParam = url.searchParams.get('data');
+    if (!dataParam) return null;
+
+    let clean = decodeURIComponent(dataParam).replace(/-/g, '+').replace(/_/g, '/');
+    while (clean.length % 4 !== 0) {
+      clean += '=';
+    }
+    const binaryString = atob(clean);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+
+    const reader = new ProtoReader(bytes);
+    const otps: MigrationOtp[] = [];
+
+    while (reader.hasMore()) {
+      const key = reader.readVarint();
+      const tag = key >> 3;
+      const wireType = key & 0x07;
+
+      if (tag === 1 && wireType === 2) {
+        const otpParamBytes = reader.readBytes();
+        const parsed = parseOtpParameters(otpParamBytes);
+        if (parsed) {
+          otps.push(parsed);
+        }
+      } else {
+        if (wireType === 0) {
+          reader.readVarint();
+        } else if (wireType === 2) {
+          reader.readBytes();
+        } else if (wireType === 1) {
+          reader.pos += 8;
+        } else if (wireType === 5) {
+          reader.pos += 4;
+        } else {
+          break;
+        }
+      }
+    }
+    return otps;
+  } catch (e) {
+    console.error('Error parsing migration payload:', e);
+    return null;
+  }
+}
+
