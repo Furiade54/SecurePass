@@ -16,10 +16,9 @@ import {
 import {
   generateTotpSync,
   getTotpRemainingSeconds,
-  parseOtpAuthUri,
+  parseAllOtpAuthUris,
   formatTotpCode,
-  buildOtpAuthUri,
-  parseMigrationPayload
+  buildOtpAuthUri
 } from '../utils/totp';
 import QRCode from 'react-qr-code';
 import { Html5Qrcode } from 'html5-qrcode';
@@ -66,7 +65,8 @@ const MfaAuthenticatorModal: React.FC<MfaAuthenticatorModalProps> = ({
   onClose,
   mfaEntries,
   onSaveMfaEntry,
-  onDeleteMfaEntry
+  onDeleteMfaEntry,
+  passwords = []
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -126,93 +126,59 @@ const MfaAuthenticatorModal: React.FC<MfaAuthenticatorModalProps> = ({
 
   // Process decoded QR text
   const processQrText = (qrText: string): boolean => {
-    const trimmed = qrText.trim();
-    if (trimmed.toLowerCase().startsWith('otpauth-migration://')) {
-      const migrationEntries = parseMigrationPayload(trimmed);
-      if (!migrationEntries || migrationEntries.length === 0) {
-        showNotification(
-          'No se encontraron cuentas válidas en el código de migración de Google Authenticator.',
-          true
-        );
-        return false;
+    const parsedList = parseAllOtpAuthUris(qrText);
+    if (parsedList.length === 0) {
+      showNotification(
+        'El código QR no contiene un formato de autenticación válido (otpauth:// o transferencia de Google Authenticator).',
+        true
+      );
+      return false;
+    }
+
+    let addedCount = 0;
+    let duplicateCount = 0;
+
+    for (const parsed of parsedList) {
+      const exists = mfaEntries.some(
+        (e) =>
+          e.secret.replace(/\s+/g, '').toUpperCase() ===
+          parsed.secret.replace(/\s+/g, '').toUpperCase()
+      );
+
+      if (exists) {
+        duplicateCount++;
+        continue;
       }
 
-      let addedCount = 0;
-      let existsCount = 0;
+      onSaveMfaEntry({
+        issuer: parsed.issuer,
+        account: parsed.account,
+        secret: parsed.secret,
+        algorithm: parsed.algorithm,
+        digits: parsed.digits,
+        period: parsed.period
+      });
+      addedCount++;
+    }
 
-      for (const entry of migrationEntries) {
-        const exists = mfaEntries.some(
-          (e) =>
-            e.secret.replace(/\s+/g, '').toUpperCase() ===
-            entry.secret.replace(/\s+/g, '').toUpperCase()
-        );
-
-        if (exists) {
-          existsCount++;
-        } else {
-          onSaveMfaEntry({
-            issuer: entry.issuer || 'Google Authenticator',
-            account: entry.name || 'MFA',
-            secret: entry.secret,
-            algorithm: entry.algorithm,
-            digits: entry.digits,
-            period: 30
-          });
-          addedCount++;
-        }
-      }
-
-      if (addedCount > 0) {
-        showNotification(
-          `¡Se importaron ${addedCount} cuenta(s) exitosamente desde Google Authenticator!${
-            existsCount > 0 ? ` (${existsCount} ya existían)` : ''
-          }`
-        );
-        return true;
+    if (addedCount > 0) {
+      if (parsedList.length > 1) {
+        showNotification(`¡Se importaron ${addedCount} cuentas MFA desde Google Authenticator!${duplicateCount > 0 ? ` (${duplicateCount} ya existían)` : ''}`);
       } else {
-        showNotification(
-          'Todas las cuentas del código de migración ya se encuentran registradas.',
-          true
-        );
-        return false;
+        showNotification(`¡Cuenta de "${parsedList[0].issuer}" agregada exitosamente!`);
       }
+      return true;
     }
 
-    const parsed = parseOtpAuthUri(qrText);
-    if (!parsed) {
+    if (duplicateCount > 0) {
       showNotification(
-        'El código QR no contiene un formato de autenticación válido (otpauth:// o otpauth-migration://). Asegúrate de escanear un código de Google Authenticator o Microsoft Authenticator.',
+        parsedList.length > 1
+          ? `Las ${duplicateCount} cuentas del código ya se encuentran registradas en tu lista.`
+          : `La cuenta "${parsedList[0].issuer}" (${parsedList[0].account || 'MFA'}) ya se encuentra registrada en tu lista.`,
         true
       );
-      return false;
     }
-
-    // Check if account already exists
-    const exists = mfaEntries.some(
-      (e) =>
-        e.secret.replace(/\s+/g, '').toUpperCase() ===
-        parsed.secret.replace(/\s+/g, '').toUpperCase()
-    );
-
-    if (exists) {
-      showNotification(
-        `La cuenta "${parsed.issuer}" (${parsed.account || 'MFA'}) ya se encuentra registrada en tu lista.`,
-        true
-      );
-      return false;
-    }
-
-    onSaveMfaEntry({
-      issuer: parsed.issuer,
-      account: parsed.account,
-      secret: parsed.secret,
-      algorithm: parsed.algorithm,
-      digits: parsed.digits,
-      period: parsed.period
-    });
-
-    showNotification(`¡Cuenta de "${parsed.issuer}" agregada exitosamente!`);
-    return true;
+    return false;
   };
 
   // Camera Scanner implementation aligned with ImportExportModal
@@ -367,15 +333,44 @@ const MfaAuthenticatorModal: React.FC<MfaAuthenticatorModalProps> = ({
     }
   };
 
+  const allUnifiedEntries = useMemo(() => {
+    const list: Array<MfaEntry & { linkedPasswordSite?: string }> = [...mfaEntries];
+    const existingSecrets = new Set(
+      mfaEntries.map((m) => m.secret.replace(/[\s\-_=]/g, '').toUpperCase())
+    );
+
+    for (const p of passwords) {
+      if (p.totpSecret) {
+        const clean = p.totpSecret.replace(/[\s\-_=]/g, '').toUpperCase();
+        if (clean && !existingSecrets.has(clean)) {
+          existingSecrets.add(clean);
+          list.push({
+            id: `pwd-${p.id}`,
+            issuer: p.site || 'Servicio',
+            account: p.username || '',
+            secret: clean,
+            algorithm: 'SHA-1',
+            digits: 6,
+            period: 30,
+            createdAt: p.createdAt || Date.now(),
+            linkedPasswordSite: p.site
+          });
+        }
+      }
+    }
+    return list;
+  }, [mfaEntries, passwords]);
+
   const filteredEntries = useMemo(() => {
-    return mfaEntries.filter((entry) => {
+    return allUnifiedEntries.filter((entry) => {
       const term = searchTerm.toLowerCase();
       return (
         entry.issuer.toLowerCase().includes(term) ||
-        entry.account.toLowerCase().includes(term)
+        entry.account.toLowerCase().includes(term) ||
+        (entry.linkedPasswordSite && entry.linkedPasswordSite.toLowerCase().includes(term))
       );
     });
-  }, [mfaEntries, searchTerm]);
+  }, [allUnifiedEntries, searchTerm]);
 
   if (!isOpen) return null;
 
@@ -532,9 +527,9 @@ const MfaAuthenticatorModal: React.FC<MfaAuthenticatorModalProps> = ({
                   QR · Google / Microsoft / Authy
                 </span>
               </div>
-              {mfaEntries.length > 0 && (
+              {allUnifiedEntries.length > 0 && (
                 <span className="text-xs font-semibold text-gray-400 px-2 py-0.5 rounded-md bg-gray-800/70 border border-gray-700/60">
-                  {mfaEntries.length} {mfaEntries.length === 1 ? 'cuenta activa' : 'cuentas activas'}
+                  {allUnifiedEntries.length} {allUnifiedEntries.length === 1 ? 'cuenta activa' : 'cuentas activas'}
                 </span>
               )}
             </div>
@@ -603,7 +598,7 @@ const MfaAuthenticatorModal: React.FC<MfaAuthenticatorModalProps> = ({
               </div>
 
               {/* Search Bar */}
-              {mfaEntries.length > 0 && (
+              {allUnifiedEntries.length > 0 && (
                 <div className="relative w-full sm:w-64">
                   <input
                     type="text"
@@ -629,12 +624,12 @@ const MfaAuthenticatorModal: React.FC<MfaAuthenticatorModalProps> = ({
                 </div>
                 <div className="space-y-1">
                   <p className="text-sm font-semibold text-gray-200">
-                    {mfaEntries.length === 0
+                    {allUnifiedEntries.length === 0
                       ? 'No hay cuentas MFA registradas'
                       : 'No se encontraron coincidencias'}
                   </p>
                   <p className="text-xs text-gray-500 max-w-md mx-auto">
-                    {mfaEntries.length === 0
+                    {allUnifiedEntries.length === 0
                       ? 'Haz clic en "Escanear con Cámara" o "Cargar imagen QR" para comenzar a generar códigos de verificación de dos factores.'
                       : 'Intenta con otro término de búsqueda.'}
                   </p>
@@ -687,6 +682,11 @@ const MfaAuthenticatorModal: React.FC<MfaAuthenticatorModalProps> = ({
                             <p className="text-xs text-gray-400 truncate">
                               {entry.account || 'Cuenta protegida'}
                             </p>
+                            {entry.linkedPasswordSite && (
+                              <span className="inline-block mt-0.5 text-[10px] text-cyan-300/80 font-medium truncate">
+                                🔗 Vinculada a contraseña
+                              </span>
+                            )}
                           </div>
                         </div>
 

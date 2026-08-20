@@ -7,7 +7,6 @@ import PasswordModal from './components/PasswordModal';
 import PasswordGeneratorModal from './components/PasswordGeneratorModal';
 import NotificationModal from './components/NotificationModal';
 import MessageModal from './components/MessageModal';
-import { FixedSizeList as List } from 'react-window';
 import ImportExportModal from './components/ImportExportModal';
 import MfaAuthenticatorModal from './components/MfaAuthenticatorModal';
 import { SecureStorageService } from './utils/secureStorage';
@@ -25,9 +24,11 @@ const PasswordItem: React.FC<{
     const [isRevealed, setIsRevealed] = useState(false);
     const [copied, setCopied] = useState<'username' | 'password' | 'mfa' | null>(null);
     const [menuOpen, setMenuOpen] = useState(false);
+    const [openUpwards, setOpenUpwards] = useState(false);
     const [mfaCode, setMfaCode] = useState<string>('');
     const [mfaRemaining, setMfaRemaining] = useState<number>(30);
     const menuRef = useRef<HTMLDivElement | null>(null);
+    const buttonRef = useRef<HTMLButtonElement | null>(null);
 
     useEffect(() => {
         if (!entry.totpSecret) {
@@ -50,21 +51,42 @@ const PasswordItem: React.FC<{
 
     useEffect(() => {
         if (!menuOpen) return;
-        const handleClickOutside = (e: MouseEvent) => {
+        const handleClickOutside = (e: MouseEvent | TouchEvent) => {
             if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
                 setMenuOpen(false);
             }
+        };
+        const handleScrollOrResize = () => {
+            setMenuOpen(false);
         };
         const handleEsc = (e: KeyboardEvent) => {
             if (e.key === 'Escape') setMenuOpen(false);
         };
         document.addEventListener('mousedown', handleClickOutside);
+        document.addEventListener('touchstart', handleClickOutside);
+        window.addEventListener('scroll', handleScrollOrResize, true);
+        window.addEventListener('resize', handleScrollOrResize);
         document.addEventListener('keydown', handleEsc);
         return () => {
             document.removeEventListener('mousedown', handleClickOutside);
+            document.removeEventListener('touchstart', handleClickOutside);
+            window.removeEventListener('scroll', handleScrollOrResize, true);
+            window.removeEventListener('resize', handleScrollOrResize);
             document.removeEventListener('keydown', handleEsc);
         };
     }, [menuOpen]);
+
+    const handleToggleMenu = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (!menuOpen && buttonRef.current) {
+            const rect = buttonRef.current.getBoundingClientRect();
+            const spaceBelow = window.innerHeight - rect.bottom;
+            const spaceAbove = rect.top;
+            // The menu is ~280px tall. If space below is insufficient and above has more space, open upwards
+            setOpenUpwards(spaceBelow < 290 && spaceAbove > spaceBelow);
+        }
+        setMenuOpen((prev) => !prev);
+    };
 
     const handleCopy = (text: string, type: 'username' | 'password' | 'mfa') => {
         navigator.clipboard.writeText(text);
@@ -110,48 +132,52 @@ const PasswordItem: React.FC<{
     };
 
     return (
-        <div className="bg-gray-800 p-2.5 rounded-lg flex items-center justify-between transition-all hover:bg-gray-700/50 hover:shadow-lg mb-2">
-            <div className="flex-1 min-w-0">
-                <div className="flex items-center space-x-6">
-                    <p className="text-lg font-bold text-cyan-400 truncate whitespace-nowrap">{entry.site}</p>
+        <div className="bg-gray-800/90 hover:bg-gray-800 p-3.5 sm:p-4 rounded-xl border border-gray-700/60 hover:border-cyan-500/40 shadow-sm flex items-center justify-between transition-all">
+            <div className="flex-1 min-w-0 pr-2">
+                <div className="flex items-center gap-2">
+                    <p className="text-base sm:text-lg font-bold text-cyan-400 truncate">{entry.site}</p>
                     <a
                         href={/^https?:\/\//.test(entry.site) ? entry.site : `https://${entry.site}`}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="p-1 text-cyan-400 hover:text-cyan-300 transition-colors"
+                        className="p-1 text-cyan-400/80 hover:text-cyan-300 transition-colors"
                         title="Ir al sitio"
                         tabIndex={0}
                         aria-label="Ir al sitio"
                         onClick={e => e.stopPropagation()}
                     >
-                        <ExternalLinkIcon className="w-4 h-4" />
+                        <ExternalLinkIcon className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                     </a>
                 </div>
-                <p className="text-sm text-gray-400 truncate">{entry.username}</p>
-                <p className="text-sm font-mono text-gray-300 mt-1">{isRevealed ? entry.password : '••••••••••••'}</p>
+                <p className="text-xs sm:text-sm text-gray-400 truncate mt-0.5">{entry.username}</p>
+                <p className="text-xs sm:text-sm font-mono text-gray-300 mt-1">{isRevealed ? entry.password : '••••••••••••'}</p>
                 {entry.totpSecret && mfaCode && (
-                    <div className="flex items-center gap-2 mt-1.5 pt-1 border-t border-gray-700/40">
-                        <span className="text-[10px] uppercase font-bold text-cyan-400 flex items-center gap-1">
+                    <div className="flex flex-wrap items-center gap-2 mt-2 pt-2 border-t border-gray-700/50">
+                        <span className="text-[10px] sm:text-[11px] uppercase font-bold text-cyan-400 flex items-center gap-1">
                             <ShieldCheckIcon className="w-3.5 h-3.5" /> MFA:
                         </span>
                         <button
                             onClick={() => handleCopy(mfaCode, 'mfa')}
-                            className="flex items-center gap-1.5 px-2 py-0.5 bg-black/40 hover:bg-black/60 rounded border border-cyan-500/30 text-xs font-mono font-bold text-cyan-300 transition-colors"
+                            className="flex items-center gap-1.5 px-2.5 py-1 bg-black/40 hover:bg-black/60 active:bg-black/80 rounded-md border border-cyan-500/30 text-xs font-mono font-bold text-cyan-300 transition-colors"
                             title="Copiar código MFA"
                         >
                             <span>{formatTotpCode(mfaCode)}</span>
                             {copied === 'mfa' ? <CheckIcon className="w-3.5 h-3.5 text-green-400" /> : <CopyIcon className="w-3.5 h-3.5 text-gray-400" />}
                         </button>
-                        <span className={`text-[10px] font-mono font-semibold px-1 rounded ${mfaRemaining <= 5 ? 'text-red-400 animate-pulse' : 'text-gray-400'}`}>
+                        <span className={`text-[10px] sm:text-[11px] font-mono font-semibold px-1.5 py-0.5 rounded bg-gray-900/60 border border-gray-700/50 ${mfaRemaining <= 5 ? 'text-red-400 animate-pulse border-red-500/30' : 'text-gray-400'}`}>
                             {mfaRemaining}s
                         </span>
                     </div>
                 )}
             </div>
-            <div className="relative ml-1" ref={menuRef}>
+            <div className="relative ml-1 flex-shrink-0" ref={menuRef}>
                 <button
-                    onClick={() => setMenuOpen((v) => !v)}
-                    className="p-2 text-gray-400 hover:text-white hover:bg-gray-700/60 rounded-md transition-colors"
+                    ref={buttonRef}
+                    onClick={handleToggleMenu}
+                    className={`p-2 rounded-lg transition-colors ${menuOpen
+                            ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                            : 'text-gray-400 hover:text-white hover:bg-gray-700/60'
+                        }`}
                     title="Más opciones"
                     aria-label="Más opciones"
                     aria-expanded={menuOpen}
@@ -159,69 +185,68 @@ const PasswordItem: React.FC<{
                     <DotsVerticalIcon className="w-5 h-5" />
                 </button>
                 {menuOpen && (
-                    <div className="absolute right-0 top-full mt-1 w-48 rounded-lg border border-gray-600/60 bg-gray-900/95 backdrop-blur-sm shadow-2xl z-40 overflow-hidden animate-in fade-in zoom-in-95 duration-150 origin-top-right">
-                        <ul className="py-1 text-sm text-gray-200">
-                            <li>
+                    <div
+                        className={`absolute right-0 w-52 rounded-xl border border-gray-700 bg-gray-900/98 backdrop-blur-md shadow-2xl z-50 overflow-hidden ${openUpwards
+                                ? 'bottom-full mb-2 origin-bottom-right'
+                                : 'top-full mt-2 origin-top-right'
+                            }`}
+                        style={{ maxHeight: 'min(380px, calc(100vh - 80px))' }}
+                    >
+                        <ul className="py-1 text-xs sm:text-sm text-gray-200 divide-y divide-gray-800/60 overflow-y-auto">
+                            <li className="space-y-0.5 p-1">
                                 <button
                                     onClick={toggleReveal}
-                                    className="flex w-full items-center gap-3 px-3 py-2 hover:bg-gray-700/60 transition-colors text-left"
+                                    className="flex w-full items-center gap-3 px-3 py-2 rounded-lg hover:bg-gray-800 hover:text-white transition-colors text-left"
                                 >
-                                    {isRevealed ? <EyeOffIcon className="w-4 h-4 text-gray-400" /> : <EyeIcon className="w-4 h-4 text-gray-400" />}
+                                    {isRevealed ? <EyeOffIcon className="w-4 h-4 text-cyan-400" /> : <EyeIcon className="w-4 h-4 text-gray-400" />}
                                     <span>{isRevealed ? 'Ocultar contraseña' : 'Mostrar contraseña'}</span>
                                 </button>
-                            </li>
-                            <li>
                                 <button
                                     onClick={copyUsername}
-                                    className="flex w-full items-center gap-3 px-3 py-2 hover:bg-gray-700/60 transition-colors text-left"
+                                    className="flex w-full items-center gap-3 px-3 py-2 rounded-lg hover:bg-gray-800 hover:text-white transition-colors text-left"
                                 >
                                     {copied === 'username' ? <CheckIcon className="w-4 h-4 text-green-400" /> : <CopyIcon className="w-4 h-4 text-gray-400" />}
                                     <span>Copiar usuario</span>
                                 </button>
-                            </li>
-                            <li>
                                 <button
                                     onClick={copyPassword}
-                                    className="flex w-full items-center gap-3 px-3 py-2 hover:bg-gray-700/60 transition-colors text-left"
+                                    className="flex w-full items-center gap-3 px-3 py-2 rounded-lg hover:bg-gray-800 hover:text-white transition-colors text-left"
                                 >
                                     {copied === 'password' ? <CheckIcon className="w-4 h-4 text-green-400" /> : <CopyIcon className="w-4 h-4 text-gray-400" />}
                                     <span>Copiar contraseña</span>
                                 </button>
                             </li>
-                            {entry.totpSecret && mfaCode && (
-                                <li>
+
+                            <li className="space-y-0.5 p-1">
+                                {entry.totpSecret && mfaCode && (
                                     <button
                                         onClick={copyMfa}
-                                        className="flex w-full items-center gap-3 px-3 py-2 hover:bg-gray-700/60 transition-colors text-left text-cyan-300"
+                                        className="flex w-full items-center gap-3 px-3 py-2 rounded-lg hover:bg-cyan-950/40 text-cyan-300 transition-colors text-left"
                                     >
                                         {copied === 'mfa' ? <CheckIcon className="w-4 h-4 text-green-400" /> : <ShieldCheckIcon className="w-4 h-4 text-cyan-400" />}
                                         <span>Copiar código MFA</span>
                                     </button>
-                                </li>
-                            )}
-                            <li>
+                                )}
                                 <button
                                     onClick={handleShareQR}
-                                    className="flex w-full items-center gap-3 px-3 py-2 hover:bg-gray-700/60 transition-colors text-left text-cyan-300"
+                                    className="flex w-full items-center gap-3 px-3 py-2 rounded-lg hover:bg-gray-800 hover:text-cyan-300 transition-colors text-left"
                                 >
                                     <QrCodeIcon className="w-4 h-4 text-cyan-400" />
                                     <span>Compartir por QR</span>
                                 </button>
                             </li>
-                            <li className="border-t border-gray-700/60 my-1" />
-                            <li>
+
+                            <li className="space-y-0.5 p-1">
                                 <button
                                     onClick={openEdit}
-                                    className="flex w-full items-center gap-3 px-3 py-2 hover:bg-gray-700/60 transition-colors text-left"
+                                    className="flex w-full items-center gap-3 px-3 py-2 rounded-lg hover:bg-gray-800 hover:text-white transition-colors text-left"
                                 >
                                     <PencilIcon className="w-4 h-4 text-gray-400" />
                                     <span>Editar</span>
                                 </button>
-                            </li>
-                            <li>
                                 <button
                                     onClick={openDelete}
-                                    className="flex w-full items-center gap-3 px-3 py-2 hover:bg-red-500/10 transition-colors text-left text-red-400"
+                                    className="flex w-full items-center gap-3 px-3 py-2 rounded-lg hover:bg-red-500/15 transition-colors text-left text-red-400"
                                 >
                                     <TrashIcon className="w-4 h-4" />
                                     <span>Eliminar</span>
@@ -295,14 +320,47 @@ const App: React.FC = () => {
     // Load ignored notifications and backup date from storage
     useEffect(() => {
         if (!isLocked && secureStorage.isStorageLocked() === false) {
-             const storedIgnored = secureStorage.get<Record<string, string[]>>('securepass_ignored_notifications', {});
-             setIgnoredNotifications(storedIgnored);
-             const storedBackupDate = secureStorage.get<number | null>('securepass_last_backup_date', null);
-             setLastBackupDate(storedBackupDate);
-             const loadedMfa = secureStorage.get<MfaEntry[]>('securepass_mfa_entries', []);
-             setMfaEntries(loadedMfa);
+            const storedIgnored = secureStorage.get<Record<string, string[]>>('securepass_ignored_notifications', {});
+            setIgnoredNotifications(storedIgnored);
+            const storedBackupDate = secureStorage.get<number | null>('securepass_last_backup_date', null);
+            setLastBackupDate(storedBackupDate);
+            const loadedMfa = secureStorage.get<MfaEntry[]>('securepass_mfa_entries', []);
+            setMfaEntries(loadedMfa);
         }
     }, [isLocked, secureStorage]);
+
+    // Auto-sync TOTP secrets from passwords into mfaEntries to ensure all MFA accounts appear in both views
+    useEffect(() => {
+        if (!isLocked && passwords.length > 0) {
+            const newEntries: MfaEntry[] = [];
+            const existingSecrets = new Set(
+                mfaEntries.map(m => m.secret.replace(/[\s\-_=]/g, '').toUpperCase())
+            );
+
+            for (const p of passwords) {
+                if (p.totpSecret) {
+                    const cleanSecret = p.totpSecret.replace(/[\s\-_=]/g, '').toUpperCase();
+                    if (cleanSecret && !existingSecrets.has(cleanSecret)) {
+                        existingSecrets.add(cleanSecret);
+                        newEntries.push({
+                            id: crypto.randomUUID(),
+                            issuer: p.site || 'Servicio',
+                            account: p.username || '',
+                            secret: cleanSecret,
+                            algorithm: 'SHA-1',
+                            digits: 6,
+                            period: 30,
+                            createdAt: p.createdAt || Date.now()
+                        });
+                    }
+                }
+            }
+
+            if (newEntries.length > 0) {
+                setMfaEntries(prev => [...newEntries, ...prev]);
+            }
+        }
+    }, [passwords, isLocked, mfaEntries]);
 
     // Persist data to secure storage when passwords change
     useEffect(() => {
@@ -341,14 +399,14 @@ const App: React.FC = () => {
 
     const handleSetGesture = (pattern: number[]) => {
         const patternString = pattern.join(',');
-        
+
         // Initialize secure storage with the gesture pattern as the unlock key
         secureStorage.initialize({ masterPassword: patternString });
-        
+
         // Save hash to know we have a setup
         const hash = EncryptionService.hashGesturePattern(pattern);
         localStorage.setItem('securepass_gesture_hash', hash);
-        
+
         setHasStoredGesture(true);
         setIsLocked(false);
 
@@ -361,7 +419,7 @@ const App: React.FC = () => {
 
     const handleUnlock = (pattern: number[]) => {
         const patternString = pattern.join(',');
-        
+
         // Verify gesture hash first
         const storedHash = localStorage.getItem('securepass_gesture_hash');
         if (storedHash) {
@@ -380,10 +438,10 @@ const App: React.FC = () => {
                 return;
             }
         }
-        
+
         // Try to unlock storage
         const success = secureStorage.unlock(patternString);
-        
+
         if (success) {
             setIsLocked(false);
             // Load passwords and MFA entries from secure storage
@@ -392,16 +450,16 @@ const App: React.FC = () => {
             const loadedMfa = secureStorage.get<MfaEntry[]>('securepass_mfa_entries', []);
             setMfaEntries(loadedMfa);
         } else {
-             setMessageModal({
-                 isOpen: true,
-                 title: 'Error',
-                 message: 'Error al desbloquear el almacenamiento seguro',
-                 type: 'error',
-                 onConfirm: undefined,
-                 onCancel: undefined,
-                 confirmText: undefined,
-                 cancelText: undefined
-             });
+            setMessageModal({
+                isOpen: true,
+                title: 'Error',
+                message: 'Error al desbloquear el almacenamiento seguro',
+                type: 'error',
+                onConfirm: undefined,
+                onCancel: undefined,
+                confirmText: undefined,
+                cancelText: undefined
+            });
         }
     };
 
@@ -415,36 +473,36 @@ const App: React.FC = () => {
             setIsLocked(false);
             setPasswords([]);
             setMfaEntries([]);
-            
+
             // Clear gesture hash only
             localStorage.removeItem('securepass_gesture_hash');
         };
 
         if (hasLegacyData) {
-             setMessageModal({
-                 isOpen: true,
-                 title: '⚠️ ¡ADVERTENCIA DE SEGURIDAD CRÍTICA! ⚠️',
-                 message: "Detectamos que tienes datos guardados con una versión anterior de la aplicación que AÚN NO HAN SIDO MIGRADOS.\n\nSi reseteas tu patrón ahora sin haber desbloqueado la aplicación al menos una vez, PERDERÁS EL ACCESO A TODAS TUS CONTRASEÑAS PERMANENTEMENTE.\n\nRecomendación: Pulsa 'Cancelar', desbloquea con tu patrón actual para asegurar tus datos, y luego intenta resetear.\n\n¿Estás seguro de que quieres continuar y arriesgarte a perder tus datos?",
-                 type: 'error',
-                 onConfirm: performReset,
-                 onCancel: undefined,
-                 confirmText: 'Sí, arriesgarse',
-                 cancelText: 'Cancelar'
-             });
+            setMessageModal({
+                isOpen: true,
+                title: '⚠️ ¡ADVERTENCIA DE SEGURIDAD CRÍTICA! ⚠️',
+                message: "Detectamos que tienes datos guardados con una versión anterior de la aplicación que AÚN NO HAN SIDO MIGRADOS.\n\nSi reseteas tu patrón ahora sin haber desbloqueado la aplicación al menos una vez, PERDERÁS EL ACCESO A TODAS TUS CONTRASEÑAS PERMANENTEMENTE.\n\nRecomendación: Pulsa 'Cancelar', desbloquea con tu patrón actual para asegurar tus datos, y luego intenta resetear.\n\n¿Estás seguro de que quieres continuar y arriesgarte a perder tus datos?",
+                type: 'error',
+                onConfirm: performReset,
+                onCancel: undefined,
+                confirmText: 'Sí, arriesgarse',
+                cancelText: 'Cancelar'
+            });
         } else {
-             setMessageModal({
-                 isOpen: true,
-                 title: 'Resetear Patrón',
-                 message: "¿Deseas resetear el patrón de desbloqueo? Tus contraseñas guardadas se conservarán y podrás acceder a ellas con el nuevo patrón.",
-                 type: 'warning',
-                 onConfirm: performReset,
-                 onCancel: undefined,
-                 confirmText: 'Resetear',
-                 cancelText: 'Cancelar'
-             });
+            setMessageModal({
+                isOpen: true,
+                title: 'Resetear Patrón',
+                message: "¿Deseas resetear el patrón de desbloqueo? Tus contraseñas guardadas se conservarán y podrás acceder a ellas con el nuevo patrón.",
+                type: 'warning',
+                onConfirm: performReset,
+                onCancel: undefined,
+                confirmText: 'Resetear',
+                cancelText: 'Cancelar'
+            });
         }
     };
-    
+
     const handleLock = () => {
         setIsLocked(true);
         setIsSidebarOpen(false);
@@ -476,6 +534,27 @@ const App: React.FC = () => {
     };
 
     const handleSavePassword = (entryData: Omit<PasswordEntry, 'id' | 'createdAt'> & { id?: string }) => {
+        // Also ensure MFA entry is registered if totpSecret is set
+        if (entryData.totpSecret) {
+            const cleanSecret = entryData.totpSecret.replace(/[\s\-_=]/g, '').toUpperCase();
+            const existsInMfa = mfaEntries.some(
+                m => m.secret.replace(/[\s\-_=]/g, '').toUpperCase() === cleanSecret
+            );
+            if (!existsInMfa && cleanSecret) {
+                const newMfa: MfaEntry = {
+                    id: crypto.randomUUID(),
+                    issuer: entryData.site || 'Servicio',
+                    account: entryData.username || '',
+                    secret: cleanSecret,
+                    algorithm: 'SHA-1',
+                    digits: 6,
+                    period: 30,
+                    createdAt: Date.now()
+                };
+                setMfaEntries(prev => [newMfa, ...prev]);
+            }
+        }
+
         const duplicate = findDuplicateEntry(entryData);
 
         if (duplicate) {
@@ -510,7 +589,7 @@ const App: React.FC = () => {
         setEditingEntry(entry);
         setIsPasswordModalOpen(true);
     };
-    
+
     const handleDelete = (id: string) => {
         setMessageModal({
             isOpen: true,
@@ -520,7 +599,7 @@ const App: React.FC = () => {
             confirmText: 'Eliminar',
             cancelText: 'Cancelar',
             onConfirm: () => {
-                 setPasswords(passwords.filter(p => p.id !== id));
+                setPasswords(passwords.filter(p => p.id !== id));
             },
             onCancel: undefined,
         });
@@ -540,6 +619,7 @@ const App: React.FC = () => {
     };
 
     const handleDeleteMfaEntry = (id: string) => {
+        const targetMfa = mfaEntries.find(m => m.id === id);
         setMessageModal({
             isOpen: true,
             title: 'Eliminar Cuenta MFA',
@@ -548,12 +628,26 @@ const App: React.FC = () => {
             confirmText: 'Eliminar',
             cancelText: 'Cancelar',
             onConfirm: () => {
-                setMfaEntries(prev => prev.filter(m => m.id !== id));
+                if (id.startsWith('pwd-')) {
+                    const pwdId = id.replace('pwd-', '');
+                    setPasswords(prev => prev.map(p => p.id === pwdId ? { ...p, totpSecret: undefined } : p));
+                } else {
+                    setMfaEntries(prev => prev.filter(m => m.id !== id));
+                    if (targetMfa) {
+                        const clean = targetMfa.secret.replace(/[\s\-_=]/g, '').toUpperCase();
+                        setPasswords(prev => prev.map(p => {
+                            if (p.totpSecret && p.totpSecret.replace(/[\s\-_=]/g, '').toUpperCase() === clean) {
+                                return { ...p, totpSecret: undefined };
+                            }
+                            return p;
+                        }));
+                    }
+                }
             },
             onCancel: undefined
         });
     };
-    
+
     const handleOpenAddModal = () => {
         setEditingEntry(null);
         setGeneratedPasswordForModal('');
@@ -583,12 +677,12 @@ const App: React.FC = () => {
         setIsGeneratorModalOpen(false);
         setIsPasswordModalOpen(true);
     };
-    
+
     const handleSelectPasswordForEdit = (id: string) => {
-      const entry = passwords.find(p => p.id === id);
-      if (entry) {
-        handleEdit(entry);
-      }
+        const entry = passwords.find(p => p.id === id);
+        if (entry) {
+            handleEdit(entry);
+        }
     };
 
     const handleIgnoreNotification = (id: string, type: string) => {
@@ -600,35 +694,35 @@ const App: React.FC = () => {
             return prev;
         });
     };
-    
+
     const handleExportSuccess = () => {
         setLastBackupDate(Date.now());
     };
 
     const categories = useMemo(() => ['all', ...Array.from(new Set(passwords.map(p => p.category).filter(Boolean)))], [passwords]);
-    
+
     const hasNotifications = useMemo(() => {
         const now = Date.now();
         const REMINDER_PERIOD_MS = 90 * 24 * 60 * 60 * 1000;
-        
+
         // Check for old passwords
         const hasOld = passwords.some(p => {
-             const isIgnored = ignoredNotifications[p.id]?.includes('old');
-             return !isIgnored && (now - p.createdAt > REMINDER_PERIOD_MS);
+            const isIgnored = ignoredNotifications[p.id]?.includes('old');
+            return !isIgnored && (now - p.createdAt > REMINDER_PERIOD_MS);
         });
-        
+
         // Check for weak passwords (less than 8 chars)
         const hasWeak = passwords.some(p => {
-             const isIgnored = ignoredNotifications[p.id]?.includes('weak');
-             return !isIgnored && (p.password.length < 8);
+            const isIgnored = ignoredNotifications[p.id]?.includes('weak');
+            return !isIgnored && (p.password.length < 8);
         });
-        
+
         // Check for duplicate passwords
         const passwordCounts = new Map<string, number>();
         passwords.forEach(p => {
             const isIgnored = ignoredNotifications[p.id]?.includes('duplicate');
             if (!isIgnored) {
-                 passwordCounts.set(p.password, (passwordCounts.get(p.password) || 0) + 1);
+                passwordCounts.set(p.password, (passwordCounts.get(p.password) || 0) + 1);
             }
         });
         const hasDuplicates = Array.from(passwordCounts.values()).some(count => count > 1);
@@ -658,8 +752,8 @@ const App: React.FC = () => {
     if (isLocked || !hasStoredGesture) {
         return (
             <>
-                <MessageModal 
-                    isOpen={messageModal.isOpen} 
+                <MessageModal
+                    isOpen={messageModal.isOpen}
                     onClose={() => setMessageModal(prev => ({ ...prev, isOpen: false }))}
                     title={messageModal.title}
                     message={messageModal.message}
@@ -675,8 +769,8 @@ const App: React.FC = () => {
 
     return (
         <>
-            <MessageModal 
-                isOpen={messageModal.isOpen} 
+            <MessageModal
+                isOpen={messageModal.isOpen}
                 onClose={() => setMessageModal(prev => ({ ...prev, isOpen: false }))}
                 title={messageModal.title}
                 message={messageModal.message}
@@ -688,18 +782,18 @@ const App: React.FC = () => {
             <div className="flex h-screen bg-gray-900 text-gray-200">
                 {/* Overlay para cerrar sidebar en móvil */}
                 {isSidebarOpen && (
-                    <div 
+                    <div
                         className="fixed inset-0 bg-black bg-opacity-50 z-20 md:hidden"
                         onClick={() => setIsSidebarOpen(false)}
                     />
                 )}
-                
+
                 {/* Sidebar */}
-                <aside className={`absolute md:relative inset-y-0 left-0 z-30 w-64 bg-gray-300/20 backdrop-blur-sm border-r border-gray-600/30 p-4 h-screen md:h-screen flex flex-col transition-transform duration-300 ease-in-out ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0`} style={{overflowY: 'auto'}}>
+                <aside className={`absolute md:relative inset-y-0 left-0 z-30 w-64 bg-gray-300/20 backdrop-blur-sm border-r border-gray-600/30 p-4 h-screen md:h-screen flex flex-col transition-transform duration-300 ease-in-out ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0`} style={{ overflowY: 'auto' }}>
                     <div className="flex justify-between items-center mb-8 flex-shrink-0">
                         <h1 className="text-2xl font-bold text-white">Secure<span className="text-cyan-400">Pass</span></h1>
                         <button onClick={() => setIsSidebarOpen(false)} className="md:hidden p-1">
-                            <XIcon className="w-6 h-6"/>
+                            <XIcon className="w-6 h-6" />
                         </button>
                     </div>
                     <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3 flex-shrink-0">Categorías</h2>
@@ -715,14 +809,14 @@ const App: React.FC = () => {
                         </div>
                         <div className="space-y-2 pt-4 flex-shrink-0">
                             <button onClick={() => { setIsGeneratorModalOpen(true); setIsSidebarOpen(false); }} className="w-full flex items-center px-3 py-2 rounded-md hover:bg-gray-700 transition-colors">
-                                <SparklesIcon className="w-5 h-5 mr-3"/> Genera contraseñas
+                                <SparklesIcon className="w-5 h-5 mr-3" /> Genera contraseñas
                             </button>
                             <button onClick={handleOpenImportExport} className="w-full flex items-center px-3 py-2 rounded-md hover:bg-gray-700 transition-colors">
-                                <ImportExportIcon className="w-5 h-5 mr-3"/> Importar/Exportar
+                                <ImportExportIcon className="w-5 h-5 mr-3" /> Importar/Exportar
                             </button>
                             <button onClick={() => { setIsMfaModalOpen(true); setIsSidebarOpen(false); }} className="w-full flex items-center justify-between px-3 py-2 rounded-md hover:bg-gray-700 transition-colors text-cyan-300 font-semibold bg-cyan-950/30 border border-cyan-500/30">
                                 <span className="flex items-center">
-                                    <ShieldCheckIcon className="w-5 h-5 mr-3 text-cyan-400"/> Códigos MFA / TOTP
+                                    <ShieldCheckIcon className="w-5 h-5 mr-3 text-cyan-400" /> Códigos MFA / TOTP
                                 </span>
                                 {mfaEntries.length > 0 && (
                                     <span className="text-xs bg-cyan-500/30 text-cyan-300 font-bold px-2 py-0.5 rounded-full">
@@ -731,7 +825,7 @@ const App: React.FC = () => {
                                 )}
                             </button>
                             <button onClick={handleLock} className="w-full flex items-center px-3 py-2 rounded-md hover:bg-gray-700 transition-colors">
-                                <LockClosedIcon className="w-5 h-5 mr-3"/> Bloquear bóveda
+                                <LockClosedIcon className="w-5 h-5 mr-3" /> Bloquear bóveda
                             </button>
                             <Disclaimer />
                         </div>
@@ -743,7 +837,7 @@ const App: React.FC = () => {
                     <header className="sticky top-0 z-20 flex-shrink-0 bg-gray-800/50 backdrop-blur-sm border-b border-gray-700/50 px-4 sm:px-6 py-3.5 flex items-center justify-between gap-3 sm:gap-4">
                         <div className="flex items-center flex-1 min-w-0 max-w-xl">
                             <button onClick={() => setIsSidebarOpen(true)} className="md:hidden p-2 -ml-2 mr-2 text-gray-400 hover:text-white rounded-lg hover:bg-gray-700/50 transition-colors" title="Abrir menú">
-                                <MenuIcon className="w-6 h-6"/>
+                                <MenuIcon className="w-6 h-6" />
                             </button>
                             <div className="relative flex-1">
                                 <input type="text" placeholder={`Buscar en ${selectedCategory === 'all' ? 'todas las contraseñas' : selectedCategory}...`}
@@ -752,7 +846,7 @@ const App: React.FC = () => {
                                     className="w-full pl-10 pr-4 py-2 bg-gray-700/80 rounded-full border border-transparent focus:bg-gray-700 focus:border-cyan-500/50 focus:ring-2 focus:ring-cyan-500/20 text-sm placeholder-gray-400 outline-none transition"
                                 />
                                 <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none">
-                                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
                                 </div>
                             </div>
                         </div>
@@ -770,8 +864,8 @@ const App: React.FC = () => {
                                     <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-cyan-400 rounded-full shadow-[0_0_6px_rgba(34,211,238,0.8)]"></span>
                                 )}
                             </button>
-                            
-                            <button 
+
+                            <button
                                 onClick={() => setIsNotificationModalOpen(true)}
                                 className={`p-2 rounded-full transition-colors relative ${hasNotifications ? 'bg-yellow-500/10 text-yellow-400 hover:bg-yellow-500/20' : 'text-gray-400 hover:text-white hover:bg-gray-700/70'}`}
                                 title="Notificaciones"
@@ -783,35 +877,23 @@ const App: React.FC = () => {
                             </button>
 
                             <button onClick={handleOpenAddModal} className="ml-1 sm:ml-1.5 bg-cyan-600 hover:bg-cyan-700 active:bg-cyan-800 text-white font-medium py-2 px-3 sm:px-4 rounded-full flex items-center shadow-sm hover:shadow transition-all">
-                                <PlusIcon className="w-5 h-5"/>
+                                <PlusIcon className="w-5 h-5" />
                                 <span className="hidden sm:inline ml-2 text-sm">Agregar nueva</span>
                             </button>
                         </div>
                     </header>
-                    <div className="flex-1 overflow-y-auto p-6">
-                        <div className="space-y-8">
+                    <div className="flex-1 overflow-y-auto p-4 sm:p-6">
+                        <div className="max-w-4xl mx-auto space-y-3.5 sm:space-y-4 pb-16">
                             {filteredPasswords.length > 0 ? (
-                                <List
-                                    height={600}
-                                    itemCount={filteredPasswords.length}
-                                    itemSize={115}
-                                    width={"100%"}
-                                    style={{overflowX: 'hidden'}}
-                                >
-                                    {({ index, style }: { index: number; style: React.CSSProperties }) => {
-                                        const entry = filteredPasswords[index];
-                                        return (
-                                            <div style={style} key={entry.id}>
-                                                <PasswordItem
-                                                    entry={entry}
-                                                    onEdit={handleEdit}
-                                                    onDelete={handleDelete}
-                                                    onShareQR={handleSharePasswordQR}
-                                                />
-                                            </div>
-                                        );
-                                    }}
-                                </List>
+                                filteredPasswords.map((entry) => (
+                                    <PasswordItem
+                                        key={entry.id}
+                                        entry={entry}
+                                        onEdit={handleEdit}
+                                        onDelete={handleDelete}
+                                        onShareQR={handleSharePasswordQR}
+                                    />
+                                ))
                             ) : (
                                 <div className="text-center py-16 text-gray-500">
                                     <h3 className="text-xl font-semibold">No se encontraron contraseñas</h3>
@@ -833,11 +915,12 @@ const App: React.FC = () => {
                 generatedPassword={generatedPasswordForModal}
                 existingEntry={editingEntry}
                 categories={categories.filter(c => c !== 'all')}
+                mfaEntries={mfaEntries}
             />
 
             <PasswordGeneratorModal
                 isOpen={isGeneratorModalOpen}
-                onClose={() => { setIsGeneratorModalOpen(false); if(isPasswordModalOpen || editingEntry) { setIsPasswordModalOpen(true); } }}
+                onClose={() => { setIsGeneratorModalOpen(false); if (isPasswordModalOpen || editingEntry) { setIsPasswordModalOpen(true); } }}
                 onPasswordGenerated={handlePasswordGenerated}
             />
 
